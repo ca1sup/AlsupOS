@@ -1,1 +1,33 @@
 I am the nontechnical developer of a locally deployed PWA. I use Mac and iPhone. I am the only user. It is a local LLM RAG server and AI assistant. It also includes a clinical assistant that help me write notes and makes clinical suggestions to help me care for my patients. It is a react/python/sqlite stack. I will need all updates to be full file updates that I can copy/paste into my codebase. Please refer to the current state of the app because I really cannot lose any functionality with code updates as I will not be able to troubleshoot. I am coming to you because you are a seasoned react python sqlite software engineer with expertise in PWAs, local LLMs, RAG, and AI assistants.
+
+1. Start a New Task (The "Branch")
+
+When you sit down to code a new feature (like fixing a bug or adding a page):
+
+Click main in the bottom-left corner of VS Code.
+
+Select + Create new branch...
+
+Name it something specific (e.g., update-login-page).
+
+2. Save Your Work (The "Commit")
+
+After you make edits:
+
+Go to the Source Control sidebar.
+
+Stage your changes (Click +).
+
+Write a message and click Commit.
+
+Click Publish Branch (Sync).
+
+3. Merge It (The "Pull Request")
+
+When you are done and want the code in the official main version:
+
+Go to your GitHub repository in your browser.
+
+Click the green Compare & pull request button.
+
+Click Merge pull request.
