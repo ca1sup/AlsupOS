@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-main: #0a0a0a; /* Updated to Charcoal (was #000000) */
+  color-scheme: dark;
+}
+
+html, body {
+  height: 100%;
+  background-color: var(--bg-main);
+  color: #a1a1aa; /* txt-body (Zinc-400) */
+  font-family: 'Inter', 'SF Pro Display', sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overflow-x: hidden;
+}
+
+/* Selection: Softer Accent */
+::selection {
+  background: rgba(255,158,128, 0.15);
+  color: #ffb088;
+}
+
+/* SCROLLBARS: Stealth Mode */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+/* UTILITIES */
+
+/* Glass Panel - Slightly more opaque for better legibility */
+.glass-panel {
+  background: rgba(10, 10, 10, 0.8);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+/* Markdown Styling - Reduced Contrast */
+.markdown-body {
+  font-size: 15px; 
+  line-height: 1.6;
+  color: inherit;
+  font-weight: 300;
+}
+
+.markdown-body p { margin-bottom: 1em; }
+.markdown-body strong { font-weight: 500; color: #e5e5e5; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3 {
+  color: #e5e5e5; /* txt-primary */
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+}
+
+.markdown-body code {
+  font-family: 'Courier Prime', monospace;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.2em 0.4em;
+  border-radius: 6px;
+  font-size: 0.9em;
+  color: #ffb088; 
+}
+
+.markdown-body pre {
+  background: #141414; /* surface */
+  padding: 1rem;
+  border-radius: 12px;
+  overflow-x: auto;
+  border: 1px solid #1f1f1f;
+  margin: 1rem 0;
+}

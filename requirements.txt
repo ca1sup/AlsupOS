@@ -1,0 +1,27 @@
+
+fastapi
+uvicorn
+aiosqlite
+python-multipart
+websockets
+schedule
+apscheduler
+aiofiles
+httpx
+beautifulsoup4
+requests
+python-dotenv
+chromadb
+sentence-transformers
+langchain-text-splitters
+Whoosh
+pypdf
+pdfplumber
+textblob
+caldav
+openai-whisper
+edge-tts
+duckduckgo-search>=5.0
+# MLX dependencies (macOS only)
+mlx
+mlx-lm

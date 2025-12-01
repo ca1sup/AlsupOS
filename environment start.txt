@@ -1,0 +1,3 @@
+cd /Users/christopheralsup/development/Alsup-vault
+source venv_stable/bin/activate
+python3 convert_epubs_v2.py "docs/Fiction Books"

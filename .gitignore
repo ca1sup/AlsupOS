@@ -1,0 +1,38 @@
+# Local database
+chroma_db/
+steward.db
+*.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+venv/
+venv_stable/
+
+# Environment files
+*.env
+
+# Docs and Logs
+docs/
+models/
+logs/
+*.log 
+.DS_Store
+
+# Misc Files
+tokens.txt
+prompts.txt
+START.command
+app icon.png
+backups/
+whoosh_index/
+models/
+whoosh_index/
+chroma_db/
+venv_stable/
+node_modules/
+frontend/node_modules/
+__pycache__/

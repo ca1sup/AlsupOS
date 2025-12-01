@@ -1,0 +1,1 @@
+FROM microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext
