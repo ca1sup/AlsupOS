@@ -1,15 +1,19 @@
 
 import React, { useEffect, useState } from 'react';
-import { Save, Trash2, Plus, Edit2, Bot } from 'lucide-react';
+import { Save, Trash2, Plus, Edit2, Bot, Folder } from 'lucide-react';
 import { useAppStore } from '../../../store/useAppStore';
 
 const SettingsPersonas: React.FC = () => {
   const [personas, setPersonas] = useState<any[]>([]);
   const [editing, setEditing] = useState<any>(null);
-  const { activePersona, setPersona } = useAppStore();
+  
+  // UPDATED: Grab folders and fetchFolders from store
+  const { activePersona, setPersona, folders, fetchFolders } = useAppStore();
 
   useEffect(() => {
     fetchPersonas();
+    // Ensure folders are loaded for the dropdown
+    if (folders.length === 0) fetchFolders();
   }, []);
 
   const fetchPersonas = async () => {
@@ -46,7 +50,7 @@ const SettingsPersonas: React.FC = () => {
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-medium text-gray-900">AI Personas</h3>
         <button 
-            onClick={() => setEditing({ name: 'New Persona', icon: 'Bot', prompt: 'You are...' })}
+            onClick={() => setEditing({ name: 'New Persona', icon: 'Bot', prompt: 'You are...', default_folder: 'all' })}
             className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
         >
             <Plus size={16} /> New
@@ -73,6 +77,25 @@ const SettingsPersonas: React.FC = () => {
                       />
                   </div>
               </div>
+              
+              {/* NEW: Default Folder Selection */}
+              <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Default Folder (RAG Scope)</label>
+                  <select 
+                    value={editing.default_folder || 'all'}
+                    onChange={e => setEditing({...editing, default_folder: e.target.value})}
+                    className="w-full p-2 border rounded-md text-sm bg-white"
+                  >
+                      <option value="all">All Folders (Unrestricted)</option>
+                      {folders.map(f => (
+                          <option key={f} value={f}>{f}</option>
+                      ))}
+                  </select>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    When active, this persona will default to searching this folder unless overridden.
+                  </p>
+              </div>
+
               <div>
                   <label className="block text-xs font-medium text-gray-500 mb-1">System Prompt</label>
                   <textarea 
@@ -102,7 +125,16 @@ const SettingsPersonas: React.FC = () => {
                             {p.name}
                             {activePersona === p.name && <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full">Active</span>}
                         </h4>
-                        <p className="text-xs text-gray-500 mt-1 line-clamp-2 max-w-md">{p.prompt}</p>
+                        
+                        {/* Display Default Folder */}
+                        <div className="flex items-center gap-1 text-xs text-blue-600 mt-1 mb-1">
+                            <Folder size={12} />
+                            <span>{p.default_folder || 'All Folders'}</span>
+                        </div>
+                        
+                        <p className="text-xs text-gray-500 line-clamp-2 max-w-md font-mono bg-gray-50 p-1 rounded">
+                            {p.prompt}
+                        </p>
                     </div>
                 </div>
                 <div className="flex items-center gap-1">

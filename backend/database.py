@@ -1,9 +1,11 @@
+
 import aiosqlite
 import json
 import logging
 import asyncio
 from datetime import datetime, timedelta
 from backend.config import DB_PATH
+from backend.prompts import PERSONA_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +115,13 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # 9. Personas
+        # 9. Personas (UPDATED SCHEMA)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS personas (
                 name TEXT PRIMARY KEY,
                 icon TEXT,
-                prompt TEXT
+                prompt TEXT,
+                default_folder TEXT DEFAULT 'all'
             )
         """)
         # 10. Cache
@@ -201,7 +204,7 @@ async def init_db():
                 collection_name TEXT,
                 file_name TEXT,
                 file_hash TEXT,
-                file_mtime REAL DEFAULT 0, -- NEW: For Smart Diffing
+                file_mtime REAL DEFAULT 0,
                 last_processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 status TEXT DEFAULT 'active',
                 UNIQUE(collection_name, file_name)
@@ -229,9 +232,13 @@ async def init_db():
             await db.execute("ALTER TABLE er_chart_history ADD COLUMN guidance_version INTEGER DEFAULT 0")
         except Exception: pass
 
-        # NEW: Migration for Smart Diffing
         try:
             await db.execute("ALTER TABLE documents ADD COLUMN file_mtime REAL DEFAULT 0")
+        except Exception: pass
+        
+        # MIGRATION: Add default_folder to personas if missing
+        try:
+            await db.execute("ALTER TABLE personas ADD COLUMN default_folder TEXT DEFAULT 'all'")
         except Exception: pass
 
         await init_personas(db)
@@ -292,7 +299,6 @@ Neuro/Ext: <>
 Results:
 <Test> - <Result> - <Interp>""",
 
-        # ... (Rest of defaults remain the same) ...
         "med_news_refresher_prompt": """Generate one single, high-yield clinical pearl for an Emergency Medicine physician. Be concise. Example: 'For PEA, remember the H's and T's...'"""
     }
 
@@ -301,14 +307,13 @@ Results:
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
 
 async def init_personas(db):
-    """Seeds the Core Triad Personas if they don't exist."""
-    triad = [
-        ("Vault", "BookOpen", "You are The Vault. You are a strict librarian..."),
-        ("Steward", "Activity", "You are The Steward. You are the executive assistant..."),
-        ("Sage", "Sparkles", "You are The Sage. You are a creative mentor...")
-    ]
-    for name, icon, prompt in triad:
-        await db.execute("INSERT OR IGNORE INTO personas (name, icon, prompt) VALUES (?, ?, ?)", (name, icon, prompt))
+    """Seeds the Personas from the Master Config if they don't exist."""
+    for name, config in PERSONA_DEFAULTS.items():
+        await db.execute(
+            """INSERT OR IGNORE INTO personas (name, icon, prompt, default_folder) 
+               VALUES (?, ?, ?, ?)""", 
+            (name, config['icon'], config['system_prompt'], config['default_folder'])
+        )
 
 def get_db_connection():
     return aiosqlite.connect(DB_PATH, timeout=60.0)
@@ -473,16 +478,19 @@ async def delete_user_fact(fid):
         await db.execute("DELETE FROM user_facts WHERE id = ?", (fid,))
         await db.commit()
 
-# --- PERSONAS ---
+# --- PERSONAS (CRUD) ---
 async def get_personas():
     async with get_db_connection() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM personas") as cursor:
             return [dict(row) for row in await cursor.fetchall()]
 
-async def update_persona(name, icon, prompt):
+async def update_persona(name, icon, prompt, default_folder="all"):
     async with get_db_connection() as db:
-        await db.execute("INSERT OR REPLACE INTO personas (name, icon, prompt) VALUES (?, ?, ?)", (name, icon, prompt))
+        await db.execute(
+            "INSERT OR REPLACE INTO personas (name, icon, prompt, default_folder) VALUES (?, ?, ?, ?)", 
+            (name, icon, prompt, default_folder)
+        )
         await db.commit()
 
 async def delete_persona(name):

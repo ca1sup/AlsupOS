@@ -377,11 +377,22 @@ async def api_get_facts(): return {"facts": await get_all_user_facts_structured(
 @app.delete("/api/memory/fact/{fact_id}")
 async def api_delete_fact(fact_id: int): await delete_user_fact(fact_id); return {"status": "success"}
 
-class PersonaPayload(BaseModel): name: str; icon: str; prompt: str
+# --- PERSONAS ENDPOINTS (UPDATED) ---
+class PersonaPayload(BaseModel):
+    name: str
+    icon: str
+    prompt: str
+    default_folder: str = "all" # New Field
+
 @app.get("/api/personas")
 async def api_get_personas(): return {"personas": await get_personas()}
+
 @app.post("/api/personas")
-async def api_update_persona(p: PersonaPayload): await update_persona(p.name, p.icon, p.prompt); return {"status": "success"}
+async def api_update_persona(p: PersonaPayload):
+    # Pass default_folder to the database
+    await update_persona(p.name, p.icon, p.prompt, p.default_folder)
+    return {"status": "success"}
+
 @app.delete("/api/personas/{name}")
 async def api_delete_persona(name: str): await delete_persona(name); return {"status": "success"}
 

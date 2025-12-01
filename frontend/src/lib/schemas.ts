@@ -79,6 +79,7 @@ export const PersonaSchema = z.object({
   name: z.string(),
   icon: z.string(),
   prompt: z.string(),
+  default_folder: z.string().optional().default('all'), // Add this line
 });
 export type Persona = z.infer<typeof PersonaSchema>;
 
