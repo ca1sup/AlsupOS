@@ -42,12 +42,12 @@ from backend.config import (
 )
 
 # --- PERFORMANCE TUNING ---
-EMBEDDING_BATCH_SIZE = 16  # Reduced for stability
+EMBEDDING_BATCH_SIZE = 32  # Reduced for stability
 WRITER_QUEUE_SIZE = 20
 
 # CRITICAL STABILITY FIX: 
 # Set to 1 to prevent SQLite "Rust Panic" / Corruption on local files
-MAX_WORKERS = 6
+MAX_WORKERS = 18
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

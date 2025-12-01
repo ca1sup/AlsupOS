@@ -4,9 +4,10 @@
 cd "$(dirname "$0")"
 
 # 2. Activate Environment (with check)
-if [ -f "venv_stable/bin/activate" ]; then
+if [ -f "venv
+/bin/activate" ]; then
     echo "✅ Activating virtual environment..."
-    source venv_stable/bin/activate
+    source venv/bin/activate
 else
     echo "❌ Error: 'venv_stable' not found. Please run setup first."
     exit 1
