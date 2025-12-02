@@ -41,12 +41,12 @@ from backend.config import (
     WHOOSH_PATH
 )
 
-# --- PERFORMANCE TUNING ---
-EMBEDDING_BATCH_SIZE = 32  # Reduced for stability
-WRITER_QUEUE_SIZE = 20
+# --- PERFORMANCE TUNING (M1 Ultra Optimized) ---
+# Utilizing 64GB Unified Memory & 64-Core GPU
+EMBEDDING_BATCH_SIZE = 16
+WRITER_QUEUE_SIZE = 100
 
-# CRITICAL STABILITY FIX: 
-# Set to 1 to prevent SQLite "Rust Panic" / Corruption on local files
+# Match physical core count (20 Cores) for file processing
 MAX_WORKERS = 18
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,7 @@ def heartbeat_worker(ingest_status, stop_event, status_queue):
             file_info = f" | {file_name}" if file_name else ""
             msg = f"  ⚡  {action}{file_info}"
         print(msg)
+        sys.stdout.flush() # Force flush to console
 
 # --- DATA STRUCTURES ---
 @dataclass
@@ -142,10 +143,17 @@ class WorkerModel:
         from sentence_transformers import SentenceTransformer
         import torch
         
-        # Use CPU to save VRAM and avoid MPS crashes
-        self.device = "cpu"
-        print(f"  [CPU] 🧬 Loading {EMBEDDING_MODEL_NAME}...")
+        self.lock = threading.Lock() # Protect GPU Access
         
+        # M1 Ultra Hardware Acceleration (MPS)
+        if torch.backends.mps.is_available():
+            self.device = "mps"
+            print(f"  [HARDWARE] 🚀 M1 Ultra GPU Activated (MPS)")
+        else:
+            self.device = "cpu"
+            print(f"  [HARDWARE] ⚠️ MPS not found, using CPU")
+        
+        # Single thread for the model itself
         torch.set_num_threads(1) 
 
         self.model = SentenceTransformer(
@@ -172,14 +180,16 @@ class WorkerModel:
         texts_with_prefix = [prefix + t for t in texts]
         
         try:
-            # FIX: Use configured batch size
-            embeddings = self.model.encode(
-                texts_with_prefix,
-                batch_size=EMBEDDING_BATCH_SIZE, 
-                normalize_embeddings=True,
-                show_progress_bar=False,
-                convert_to_numpy=True
-            )
+            # CRITICAL FIX: Serialize GPU access to prevent MPS contention/crashes
+            # while keeping text processing parallel
+            with self.lock:
+                embeddings = self.model.encode(
+                    texts_with_prefix,
+                    batch_size=EMBEDDING_BATCH_SIZE, 
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                    convert_to_numpy=True
+                )
             return embeddings.tolist()
         except Exception as e:
             print(f"  ⚠️  Encoding error: {e}")
@@ -255,6 +265,7 @@ def process_file_task(task: IngestTask, model_instance: WorkerModel) -> Tuple[Fi
                 ))
         
         if chunk_texts:
+            # Calls the shared model (which handles locking internally)
             vectors = model_instance.encode_batch(chunk_texts)
             write_task = WriteTask(vectors, chunk_texts, metas, ids, task.collection, doc_tracking)
             
@@ -394,22 +405,23 @@ def writer_thread_func(write_queue: queue.Queue, stop_event):
     conn.close()
 
 # --- WORKER FUNCTION ---
-def worker_entrypoint(task: IngestTask):
-    model = getattr(threading.current_thread(), 'model', None)
-    if not model:
-        model = WorkerModel()
-        setattr(threading.current_thread(), 'model', model)
-    
+def worker_entrypoint(task: IngestTask, model: WorkerModel):
+    # Model is now passed in, no per-thread initialization needed!
     return process_file_task(task, model)
 
 # --- MAIN ORCHESTRATOR ---
 def run_ingest_process(status_queue, settings_dict):
+    # Ensure logs output to console even in subprocess
+    sys.stdout.reconfigure(line_buffering=True)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+    
     try:
         def log_msg(msg):
             print(msg)
+            sys.stdout.flush() 
             if status_queue: status_queue.put(msg)
 
-        log_msg("🚀 Starting SAFE-MODE Ingest (Sequential)...")
+        log_msg("🚀 Starting M1 Ultra Ingest (Optimized)...")
         
         ingest_status = IngestStatus()
         stop_heartbeat = threading.Event()
@@ -445,17 +457,23 @@ def run_ingest_process(status_queue, settings_dict):
             return
 
         total_files = len(tasks)
-        log_msg(f"📊 Processing {total_files} files (Safe Mode)...")
+        log_msg(f"📊 Processing {total_files} files (Parallel)...")
 
-        # 4. Processing Loop
+        # 4. Processing Loop (Fixed for M1 Ultra Stability)
         processed_count = 0
         skipped_count = 0
         error_count = 0
         total_chunks = 0
         start_time = time.time()
 
+        # Initialize ONE shared model on the main thread (Approx 0.5GB VRAM)
+        log_msg("  🧬 Loading Shared Embedding Model...")
+        shared_model = WorkerModel()
+
+        # Use 20 workers to match CPU Cores for text splitting/hashing
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_task = {executor.submit(worker_entrypoint, task): task for task in tasks}
+            # Pass the shared model to workers
+            future_to_task = {executor.submit(worker_entrypoint, task, shared_model): task for task in tasks}
             
             for future in concurrent.futures.as_completed(future_to_task):
                 processed_count += 1
