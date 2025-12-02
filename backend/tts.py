@@ -21,11 +21,29 @@ except ImportError:
 # --- Robust Import for MLX Audio (Kokoro TTS) ---
 MLX_TTS_AVAILABLE = False
 try:
+    import mlx.core as mx
     from mlx_audio.tts.models.kokoro import KokoroPipeline
     from mlx_audio.tts.utils import load_model as load_tts_model_raw
     MLX_TTS_AVAILABLE = True
+
+    # --- MONKEYPATCH FOR KOKORO COMPATIBILITY ---
+    # Fixes: KPipeline.__call__() got an unexpected keyword argument 'lang'
+    # We patch the specific class imported from mlx_audio
+    if hasattr(KokoroPipeline, '__call__'):
+        _original_call = KokoroPipeline.__call__
+        
+        def _patched_call(self, *args, **kwargs):
+            # Remove 'lang' if present, as newer Kokoro models/wrappers don't accept it here
+            if 'lang' in kwargs:
+                kwargs.pop('lang')
+            return _original_call(self, *args, **kwargs)
+            
+        KokoroPipeline.__call__ = _patched_call
+        logger.info("✅ Applied KokoroPipeline patch for 'lang' compatibility")
+    # --------------------------------------------
+
 except ImportError:
-    logger.warning("❌ mlx-audio not installed. TTS disabled. Run: pip install mlx-audio soundfile")
+    logger.warning("❌ mlx-audio or mlx not installed. TTS disabled. Run: pip install mlx-audio soundfile")
 
 # Valid voice mappings for Kokoro-82M-bf16
 KOKORO_VOICES = {
@@ -80,7 +98,6 @@ class MLXWhisperWrapper:
             initial_prompt=prompt,
             verbose=False
         )
-        # Hallucination filter removed per user request
         return result
 
 # Singleton Storage for STT
@@ -119,18 +136,23 @@ async def get_whisper_model():
 # --- KOKORO TTS WRAPPER ---
 TTS_PIPELINE_INSTANCE = None
 
-async def get_tts_pipeline(voice_code='a'):
+def get_tts_pipeline_sync(voice_code='a'):
+    """
+    Synchronous loader for TTS Pipeline to avoid Metal threading crashes.
+    """
     global TTS_PIPELINE_INSTANCE
     if not MLX_TTS_AVAILABLE: return None
     if TTS_PIPELINE_INSTANCE: return TTS_PIPELINE_INSTANCE
 
     logger.info(f"🗣️ Loading Kokoro TTS: {TTS_MODEL_NAME}")
     try:
-        def _load():
-            model = load_tts_model_raw(TTS_MODEL_NAME)
-            return KokoroPipeline(lang_code=voice_code, model=model, repo_id=TTS_MODEL_NAME)
-
-        TTS_PIPELINE_INSTANCE = await asyncio.to_thread(_load)
+        # Load model directly (not in a thread) to ensure Metal context is correct
+        model = load_tts_model_raw(TTS_MODEL_NAME)
+        
+        # CRITICAL: Force evaluation of parameters to load weights into memory immediately.
+        mx.eval(model.parameters())
+        
+        TTS_PIPELINE_INSTANCE = KokoroPipeline(lang_code=voice_code, model=model, repo_id=TTS_MODEL_NAME)
         logger.info("✅ Kokoro TTS Loaded.")
         return TTS_PIPELINE_INSTANCE
     except Exception as e:
@@ -140,7 +162,6 @@ async def get_tts_pipeline(voice_code='a'):
 async def generate_audio_briefing(text: str) -> str:
     """
     Generates an audio file from the text using local Kokoro TTS (MLX).
-    Consumes the generator to handle streaming output correctly.
     """
     settings = await get_all_settings()
     requested_voice = settings.get("tts_voice", DEFAULT_VOICE)
@@ -149,7 +170,9 @@ async def generate_audio_briefing(text: str) -> str:
     lang_code = 'b' if requested_voice.startswith(('bf_', 'bm_')) else 'a'
     voice = get_valid_voice(requested_voice, lang_code)
     
-    pipeline = await get_tts_pipeline(lang_code)
+    # Call synchronous loader
+    pipeline = get_tts_pipeline_sync(lang_code)
+    
     if not pipeline: 
         logger.error("TTS pipeline not available")
         return ""
@@ -166,45 +189,76 @@ async def generate_audio_briefing(text: str) -> str:
                 logger.info("🔵 Calling pipeline...")
                 result = pipeline(text, voice=voice, speed=1.0)
                 
-                # 2. Consume Result (Generator vs Object)
+                # 2. Consume Result
                 sample_rate = 24000
                 audio_parts = []
                 
                 # Check for Generator (Streaming Mode)
-                if hasattr(result, '__next__') or (hasattr(result, '__iter__') and not isinstance(result, (tuple, list, np.ndarray))):
+                # MLX pipeline returns a generator yielding tuples/lists of (graphemes, phonemes, audio)
+                is_generator = hasattr(result, '__next__') or (hasattr(result, '__iter__') and not isinstance(result, (tuple, list, np.ndarray)))
+                
+                if is_generator:
                     logger.info("🟡 Result is a generator - consuming chunks...")
-                    for chunk in result:
-                        # Inspect Chunk
-                        part = chunk
-                        if isinstance(chunk, tuple):
-                            if len(chunk) > 0: part = chunk[0]
-                            if len(chunk) >= 2 and isinstance(chunk[1], int): sample_rate = chunk[1]
+                    for i, chunk in enumerate(result):
+                        audio_part = None
                         
-                        # Convert Chunk to NumPy immediately
-                        if hasattr(part, 'numpy'): part = part.numpy()
-                        elif not isinstance(part, np.ndarray): part = np.array(part)
+                        # Inspect structure: We look for a sequence of 3 items: (str, str, array)
+                        if hasattr(chunk, '__len__') and len(chunk) == 3:
+                            # Assume it's (graphemes, phonemes, audio)
+                            try:
+                                candidate = chunk[2]
+                                # Verify it's not a string (phonemes are strings)
+                                if not isinstance(candidate, (str, bytes)):
+                                    audio_part = candidate
+                            except IndexError:
+                                pass
                         
-                        audio_parts.append(part)
+                        # Fallback: if we couldn't extract from index 2, check if chunk itself is audio
+                        if audio_part is None:
+                            # If it's a big array/list, it's likely audio.
+                            if hasattr(chunk, 'shape') and (len(chunk.shape) == 1 and chunk.shape[0] > 10):
+                                audio_part = chunk
+                            elif isinstance(chunk, list) and len(chunk) > 100: 
+                                audio_part = chunk
+                        
+                        # Process audio_part
+                        if audio_part is not None:
+                            try:
+                                # Convert MLX array or list to Numpy
+                                if hasattr(audio_part, 'numpy'): 
+                                    np_chunk = audio_part.numpy()
+                                elif not isinstance(audio_part, np.ndarray):
+                                    np_chunk = np.array(audio_part)
+                                else:
+                                    np_chunk = audio_part
+                                
+                                # FLATTEN to ensure 1D (samples,)
+                                # This fixes the (1, N) vs (1, M) concatenation error
+                                np_chunk = np_chunk.flatten()
+                                
+                                if np_chunk.size > 0:
+                                    audio_parts.append(np_chunk)
+                            except Exception as e:
+                                logger.warning(f"⚠️ Chunk {i} conversion failed: {e}")
+                                
                     logger.info(f"🟡 Collected {len(audio_parts)} chunks")
                 
-                # Check for Tuple (Single Result)
-                elif isinstance(result, tuple):
-                    logger.info("🟡 Result is a tuple")
-                    if len(result) > 0:
-                        part = result[0]
-                        if len(result) >= 2 and isinstance(result[1], int): sample_rate = result[1]
-                        
-                        if hasattr(part, 'numpy'): part = part.numpy()
-                        elif not isinstance(part, np.ndarray): part = np.array(part)
-                        audio_parts.append(part)
-                
-                # Direct Object (Single Result)
+                # Handle Non-Generator (Single Result)
                 else:
-                    logger.info("🟡 Result is a direct object")
+                    logger.info("🟡 Result is a single object")
                     part = result
+                    # Unpack if tuple/list (graphemes, phonemes, audio)
+                    if isinstance(result, (tuple, list)) and len(result) == 3:
+                        part = result[2]
+                    
                     if hasattr(part, 'numpy'): part = part.numpy()
                     elif not isinstance(part, np.ndarray): part = np.array(part)
-                    audio_parts.append(part)
+                    
+                    # Flatten here too
+                    part = part.flatten()
+                    
+                    if part.size > 0:
+                        audio_parts.append(part)
 
                 # 3. Concatenate
                 if not audio_parts:
@@ -216,7 +270,6 @@ async def generate_audio_briefing(text: str) -> str:
                     audio_data = np.concatenate(audio_parts)
                 
                 # 4. Final Validation & Squeeze
-                # Flattens (N, 1) or (1, N) to (N,) for soundfile
                 audio_data = np.squeeze(audio_data)
                 
                 if audio_data.size == 0:
@@ -231,6 +284,7 @@ async def generate_audio_briefing(text: str) -> str:
                 logger.error(f"❌ Synthesis logic failed: {e}", exc_info=True)
                 raise e
 
+        # We run the synthesis loop in a thread, BUT the model is now fully loaded in the parent process.
         await asyncio.to_thread(_synthesize)
         return path
 

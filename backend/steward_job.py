@@ -16,6 +16,7 @@ from backend.database import (
 )
 from backend.rag import get_ai_response
 from backend.apple_actions import get_recently_completed_reminders
+from backend.prompts import STEWARD_USER_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -38,70 +39,71 @@ async def run_daily_summary():
         settings = await get_all_settings()
         if settings.get("steward_enabled", "true") != "true": return
 
-        # 1. Gather Context
+        # 1. Gather Definite Context
         current_date_str = datetime.now().strftime("%A, %B %d")
+        
         todays_events_str = await get_todays_events()
+        weeks_events = await get_weeks_events_structured()
+        weeks_str = "\n".join([f"- {e['title']} ({e['start_time']})" for e in weeks_events])
+        
         tasks = await get_pending_tasks()
         tasks_str = "\n".join([f"- {t['description']}" for t in tasks]) if tasks else "No pending tasks."
         
         try:
             completed_tasks = get_recently_completed_reminders()
             completed_str = "\n".join([f"- {t}" for t in completed_tasks]) if completed_tasks else "None."
-        except: completed_str = "Error."
+        except: completed_str = "Unavailable"
 
         journal_context = await get_recent_journals_content(days=2)
         health = await get_recent_health_metrics_structured(days=1)
         health_str = str(health[0]) if health else "No recent health data."
+        
         facts = await get_all_user_facts()
         facts_str = "\n".join([f"- {f}" for f in facts])
 
-        weeks_events = await get_weeks_events_structured()
-        weeks_str = "\n".join([f"- {e['title']} ({e['start_time']})" for e in weeks_events])
+        # 2. Definite Data Dictionary
+        # We manually construct 'all_context' here so the DB template can use it.
+        context_data = {
+            "current_date": current_date_str,
+            "todays_events": todays_events_str,
+            "weeks_events": weeks_str,
+            "tasks": tasks_str,
+            "completed": completed_str,
+            "recent_journals": journal_context,
+            "health_summary": health_str,
+            "family_context": facts_str,
+            
+            # OPTION 1 FIX: Create the aggregate variable
+            "all_context": f"""
+            --- AGGREGATED CONTEXT ---
+            CALENDAR: {todays_events_str}
+            TASKS: {tasks_str}
+            HEALTH: {health_str}
+            FACTS: {facts_str}
+            """
+        }
 
-        # 2. Construct Prompt using Settings
-        template = settings.get("steward_daily_prompt_template") or """
-        You are my steward. It is {current_date}.
-        Events: {todays_events}
-        Tasks: {tasks}
-        Health: {health_summary}
-        Journal: {recent_journals}
-        Please summarize my day and suggest improvements.
-        """
+        # 3. Format with Fallback
+        db_template = settings.get("steward_daily_prompt_template")
+        prompt = ""
         
-        # Robust formatting: provide all potential keys
-        prompt = template.format(
-            current_date=current_date_str,
-            todays_events=todays_events_str,
-            weeks_events=weeks_str,
-            tasks=tasks_str,
-            completed=completed_str,
-            recent_journals=journal_context,
-            health_summary=health_str,
-            family_context=facts_str, 
-            
-            # FIX: Added 'all_context' to resolve previous KeyError
-            all_context=f"Events: {todays_events_str}\nTasks: {tasks_str}\nHealth: {health_str}\nFacts: {facts_str}",
+        if db_template:
+            try:
+                # This should now succeed even if it uses {all_context}
+                prompt = db_template.format(**context_data)
+            except KeyError as e:
+                logger.warning(f"⚠️ Custom/DB template failed: {e}. Falling back to default.")
+                prompt = STEWARD_USER_PROMPT_TEMPLATE.format(**context_data)
+        else:
+            prompt = STEWARD_USER_PROMPT_TEMPLATE.format(**context_data)
 
-            # Fill placeholders if they exist in the template but not calculated here
-            finance_summary="Finance sync pending",
-            workout_plan="Workout pending",
-            worship_plan="Worship pending",
-            homeschool_plan="Homeschool pending",
-            clinical_pearl="No pearl today",
-            months_events="",
-            
-            # FIX: Added missing keys for robustness (risk_analysis_output error)
-            risk_analysis_output="No specific risk analysis generated.",
-            project_updates="No active project updates."
-        )
-
-        # 3. Generate
+        # 4. Generate
         response = await get_ai_response([
             {"role": "system", "content": settings.get("system_prompt", "You are a helpful steward.")},
             {"role": "user", "content": prompt}
         ])
 
-        # 4. Save
+        # 5. Save
         await save_suggestion(response, response) 
         logger.info("Daily Summary Generated.")
 

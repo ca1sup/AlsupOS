@@ -255,7 +255,6 @@ STEWARD_USER_PROMPT_TEMPLATE = """
 
 ## 1. CORE CONTEXT
 {family_context}
-{all_context}
 
 ## 2. CALENDAR (Hard Landscape)
 **Today:**
@@ -275,8 +274,6 @@ STEWARD_USER_PROMPT_TEMPLATE = """
 ## 5. INPUTS
 **Recent Journaling:**
 {recent_journals}
-**Clinical Pearl of the Day:**
-{clinical_pearl}
 
 ---
 # YOUR MISSION
