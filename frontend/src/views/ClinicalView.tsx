@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Sidebar from '../components/Sidebar';
-import MobileNav from '../components/MobileNav';
 import { useAppStore, ERPatient, ERChart } from '../store/useAppStore';
 import renderMarkdown from '../lib/markdown';
 import { useNavigate } from 'react-router-dom';
@@ -115,8 +114,14 @@ const DictationRecorder: React.FC<{ pid: number; onUpload: () => void }> = ({ pi
 };
 
 // --- ENHANCED HEADER ---
-const EnhancedHeader: React.FC<{ patient: ERPatient }> = ({ patient }) => {
-    // Simple duration calc
+interface HeaderProps {
+    patient: ERPatient;
+    onClose: () => void;
+    onArchive: () => void;
+    onDelete: () => void;
+}
+
+const EnhancedHeader: React.FC<HeaderProps> = ({ patient, onClose, onArchive, onDelete }) => {
     const arrival = new Date(patient.created_at);
     const now = new Date();
     const diffMs = now.getTime() - arrival.getTime();
@@ -124,27 +129,49 @@ const EnhancedHeader: React.FC<{ patient: ERPatient }> = ({ patient }) => {
     const diffMins = Math.floor((diffMs % 3600000) / 60000);
 
     return (
-        <div className="h-20 px-6 border-b border-white/5 flex items-center justify-between shrink-0 bg-surface/50 backdrop-blur-md">
-            <div className="flex items-center gap-4">
-                <div className="w-10 h-10 rounded-lg bg-accent text-void flex items-center justify-center font-bold text-lg shadow-glow">
+        <div className="h-auto md:h-20 py-4 px-6 border-b border-white/5 flex flex-col md:flex-row items-start md:items-center justify-between shrink-0 bg-surface/50 backdrop-blur-md gap-4">
+            <div className="flex items-center gap-4 flex-1 overflow-hidden">
+                <div className="w-10 h-10 rounded-lg bg-accent text-void flex items-center justify-center font-bold text-lg shadow-glow shrink-0">
                     {patient.room_label}
                 </div>
-                <div>
-                    <h2 className="text-xl font-medium text-white flex items-center gap-2">
-                        {patient.age_sex} 
-                        <span className="text-txt-tertiary">•</span> 
-                        {patient.chief_complaint}
+                <div className="min-w-0">
+                    <h2 className="text-xl font-medium text-white flex items-center gap-2 truncate">
+                        <span className="truncate">{patient.age_sex} • {patient.chief_complaint}</span>
                     </h2>
                     <div className="flex items-center gap-3 text-xs text-txt-secondary mt-0.5">
-                        <span className="flex items-center gap-1">
+                        <span className="flex items-center gap-1 shrink-0">
                             <Clock size={12} className="text-accent" />
                             LOS: {diffHrs}h {diffMins}m
                         </span>
-                        <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/5">
+                        <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/5 shrink-0">
                             Acuity: {patient.acuity_level || 3}
                         </span>
                     </div>
                 </div>
+            </div>
+            
+            <div className="flex items-center gap-2 md:gap-3 self-end md:self-auto">
+                <button 
+                    onClick={onDelete}
+                    className="p-2 md:p-2.5 text-txt-tertiary hover:text-red-500 hover:bg-red-500/10 rounded-xl transition-colors"
+                    title="Delete Record"
+                >
+                    <Trash2 size={20} />
+                </button>
+                <button 
+                    onClick={onArchive} 
+                    className="p-2 md:p-2.5 text-txt-tertiary hover:text-accent hover:bg-accent/10 rounded-xl transition-colors"
+                    title="Archive Patient"
+                >
+                    <Archive size={20} />
+                </button>
+                <button 
+                    onClick={onClose} 
+                    className="p-2 md:p-2.5 text-txt-tertiary hover:text-white hover:bg-white/10 rounded-xl transition-colors"
+                    title="Close Chart"
+                >
+                    <X size={24} />
+                </button>
             </div>
         </div>
     );
@@ -382,11 +409,11 @@ const ClinicalView: React.FC = () => {
       </div>
 
       <div className="flex-1 flex flex-col md:pl-64 h-full relative">
-        <MobileNav onMenuClick={() => setSidebarOpen(true)} />
-
+        {/* Removed MobileNav per request */}
+        
         <main className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar">
             {/* Header */}
-            <div className="flex justify-between items-center mb-8">
+            <div className="flex justify-between items-center mb-6 md:mb-8">
                 <div className="flex items-center gap-4">
                     <button 
                         onClick={() => navigate('/')} 
@@ -396,47 +423,49 @@ const ClinicalView: React.FC = () => {
                         <ChevronLeft size={28} />
                     </button>
                     <div>
-                        <h1 className="text-3xl font-light tracking-tight text-white mb-1">Emergency Room</h1>
-                        <p className="text-txt-secondary text-sm">Active Patient Board • {erPatients.length} Active</p>
+                        <h1 className="text-2xl md:text-3xl font-light tracking-tight text-white mb-1">Emergency Room</h1>
+                        <p className="text-txt-secondary text-xs md:text-sm">Active Patient Board • {erPatients.length} Active</p>
                     </div>
                 </div>
-                <div className="flex gap-3">
+                <div className="flex gap-2 md:gap-3">
                     <button onClick={() => { fetchMedicalSources(); setIsSettingsOpen(true); }} className="p-3 bg-surface hover:bg-elevated rounded-xl border border-white/5 transition-all text-txt-secondary hover:text-white">
                         <Settings size={20} />
                     </button>
-                    <button onClick={() => setIsNewPatientOpen(true)} className="flex items-center gap-2 bg-accent hover:bg-white text-void px-5 py-3 rounded-xl font-bold transition-all shadow-glow active:scale-95">
+                    <button onClick={() => setIsNewPatientOpen(true)} className="flex items-center gap-2 bg-accent hover:bg-white text-void px-4 py-3 rounded-xl font-bold transition-all shadow-glow active:scale-95">
                         <Plus size={20} />
-                        <span>Admit Patient</span>
+                        <span className="hidden md:inline">New Patient</span>
+                        <span className="md:hidden">New</span>
                     </button>
                 </div>
             </div>
 
             {/* Patient Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 pb-20">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4 pb-20">
                 {erPatients.map(p => (
                     <div 
                         key={p.id} 
                         onClick={() => setSelectedPatient(p)}
-                        className="bg-surface border border-white/5 p-5 rounded-2xl hover:border-accent/30 transition-all cursor-pointer group relative overflow-hidden"
+                        className="bg-surface border border-white/5 p-3 md:p-4 rounded-xl hover:border-accent/30 transition-all cursor-pointer group flex flex-col justify-between h-32 md:h-auto"
                     >
-                        <div className="absolute top-0 right-0 p-4 opacity-50 group-hover:opacity-100 transition-opacity">
-                            <Activity size={20} className="text-accent" />
-                        </div>
-                        <div className="flex items-start gap-4 mb-4">
-                            <div className="w-12 h-12 rounded-xl bg-elevated flex items-center justify-center text-lg font-bold text-txt-primary border border-white/5">
-                                {p.room_label}
+                        {/* Improved Card Header */}
+                        <div className="flex justify-between items-start mb-2">
+                             <div className="flex items-center gap-2 md:gap-3">
+                                <div className="w-8 h-8 md:w-10 md:h-10 rounded-lg bg-elevated flex items-center justify-center text-sm md:text-lg font-bold text-txt-primary border border-white/5 shrink-0">
+                                    {p.room_label}
+                                </div>
+                                <div>
+                                    <h3 className="text-sm md:text-base font-medium text-white leading-tight">{p.age_sex}</h3>
+                                    <div className="text-[10px] text-txt-tertiary mt-0.5">
+                                        {new Date(p.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                    </div>
+                                </div>
                             </div>
-                            <div>
-                                <h3 className="text-lg font-medium text-white">{p.age_sex}</h3>
-                                <p className="text-sm text-txt-tertiary line-clamp-1">{p.chief_complaint}</p>
-                            </div>
+                            <Activity size={16} className="text-accent opacity-50 group-hover:opacity-100 transition-opacity" />
                         </div>
-                        <div className="flex gap-2">
-                            <span className="px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-green-500/20 text-green-400">Active</span>
-                            <span className="px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/5 text-txt-secondary">
-                                {new Date(p.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                            </span>
-                        </div>
+                        
+                        <p className="text-xs md:text-sm text-txt-tertiary line-clamp-2 md:line-clamp-3 leading-relaxed">
+                            {p.chief_complaint}
+                        </p>
                     </div>
                 ))}
                 {erPatients.length === 0 && <div className="col-span-full py-20 text-center text-txt-tertiary font-light">No active patients.</div>}
@@ -449,7 +478,7 @@ const ClinicalView: React.FC = () => {
             <div className="fixed inset-0 z-[60] flex items-center justify-center bg-void/90 backdrop-blur-sm p-4 animate-fade-in">
                 <div className="bg-surface p-8 rounded-[32px] border border-border-subtle w-full max-w-lg shadow-2xl flex flex-col relative animate-slide-up">
                     <button onClick={() => setIsNewPatientOpen(false)} className="absolute top-6 right-6 text-txt-tertiary hover:text-white"><X size={24} /></button>
-                    <h2 className="text-2xl font-light text-white mb-6">Admit Patient</h2>
+                    <h2 className="text-2xl font-light text-white mb-6">New Patient</h2>
                     <div className="space-y-4">
                         <div>
                             <label className="text-[10px] font-bold text-txt-tertiary uppercase tracking-wider mb-2 block">Room</label>
@@ -479,45 +508,23 @@ const ClinicalView: React.FC = () => {
         {selectedPatient && (
             <div className="fixed inset-0 z-[60] bg-void/95 backdrop-blur-md flex flex-col animate-fade-in">
                 
-                {/* Header (Enhanced) */}
-                <div className="relative">
-                    <EnhancedHeader patient={selectedPatient} />
-                    
-                    {/* Archive / Close Actions */}
-                    <div className="absolute right-6 top-6 flex items-center gap-3">
-                        <button 
-                            onClick={handleDelete}
-                            className="p-2.5 text-txt-tertiary hover:text-red-500 hover:bg-red-500/10 rounded-xl transition-colors"
-                            title="Delete Record"
-                        >
-                            <Trash2 size={20} />
-                        </button>
-                        <button 
-                            onClick={handleArchive} 
-                            className="p-2.5 text-txt-tertiary hover:text-accent hover:bg-accent/10 rounded-xl transition-colors"
-                            title="Archive Patient"
-                        >
-                            <Archive size={20} />
-                        </button>
-                        <button 
-                            onClick={() => setSelectedPatient(null)} 
-                            className="p-2.5 text-txt-tertiary hover:text-white hover:bg-white/10 rounded-xl transition-colors"
-                            title="Close Chart"
-                        >
-                            <X size={24} />
-                        </button>
-                    </div>
-                </div>
+                {/* Header (Enhanced) with embedded controls */}
+                <EnhancedHeader 
+                    patient={selectedPatient} 
+                    onClose={() => setSelectedPatient(null)}
+                    onArchive={handleArchive}
+                    onDelete={handleDelete}
+                />
 
                 {/* Content */}
-                <div className="flex-1 flex overflow-hidden">
+                <div className="flex-1 flex overflow-hidden flex-col md:flex-row">
                     
                     {/* Left: The Chart */}
-                    <div className="flex-1 overflow-y-auto p-8 border-r border-white/5 custom-scrollbar">
+                    <div className="flex-1 overflow-y-auto p-4 md:p-8 md:border-r border-white/5 custom-scrollbar">
                         <div className="max-w-3xl mx-auto space-y-8">
                             {currentChart ? (
                                 <div 
-                                    className="markdown-body prose prose-invert prose-p:text-txt-secondary prose-headings:text-txt-primary prose-strong:text-white max-w-none"
+                                    className="markdown-body prose prose-invert prose-p:text-txt-secondary prose-headings:text-txt-primary prose-strong:text-white max-w-none text-sm md:text-base"
                                     dangerouslySetInnerHTML={{ __html: renderMarkdown(currentChart.chart_markdown) }}
                                 />
                             ) : (
@@ -531,11 +538,11 @@ const ClinicalView: React.FC = () => {
                     </div>
 
                     {/* Right: The Brain (Guidance) */}
-                    <div className="w-[450px] bg-surface/30 flex flex-col border-l border-white/5 backdrop-blur-xl">
+                    <div className="h-[40vh] md:h-auto md:w-[450px] bg-surface/30 flex flex-col border-t md:border-t-0 md:border-l border-white/5 backdrop-blur-xl">
                         <GuidancePanel chart={currentChart} />
 
                         {/* Dictation Bar */}
-                        <div className="p-6 border-t border-white/5 bg-void">
+                        <div className="p-4 md:p-6 border-t border-white/5 bg-void">
                             {agentStatus && (
                                 <div className="mb-4 flex items-center justify-center gap-2 animate-pulse text-accent text-xs font-mono uppercase tracking-widest">
                                     <RefreshCw size={12} className="animate-spin" />
@@ -552,7 +559,7 @@ const ClinicalView: React.FC = () => {
             </div>
         )}
 
-        {/* 3. SETTINGS (Same as before) */}
+        {/* 3. SETTINGS */}
         {isSettingsOpen && (
             <div className="fixed inset-0 z-[70] flex items-center justify-center bg-void/90 backdrop-blur-sm p-4 animate-fade-in">
                 <div className="bg-surface p-8 rounded-[32px] border border-border-subtle w-full max-w-2xl shadow-2xl flex flex-col max-h-[85vh] animate-slide-up">
@@ -560,7 +567,6 @@ const ClinicalView: React.FC = () => {
                         <h2 className="text-xl font-light text-txt-primary">Clinical Knowledge Sources</h2>
                         <button onClick={() => setIsSettingsOpen(false)} className="text-txt-secondary hover:text-white transition-colors"><X size={24} /></button>
                     </div>
-                    {/* ... (Existing Source Settings UI) ... */}
                     <div className="bg-elevated/50 p-4 rounded-xl border border-white/5 mb-6 text-sm text-txt-secondary flex items-start gap-3">
                         <Globe className="shrink-0 text-accent mt-0.5" size={16} />
                         <p>The AI Scribe uses these trusted domains to research guidelines and verify your treatment plans via RAG.</p>
