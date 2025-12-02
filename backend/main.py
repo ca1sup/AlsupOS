@@ -56,10 +56,14 @@ from backend.er_agent import process_er_audio_update, ER_STATUS
 # Ingest Worker Import
 from backend.ingest import run_ingest_process
 
+# Centralized Voice Logic (TTS & STT)
 try:
-    from backend.tts import generate_audio_briefing
+    from backend.tts import generate_audio_briefing, get_whisper_model, load_whisper_model
 except ImportError:
+    # Fallbacks if backend.tts fails completely
     async def generate_audio_briefing(text): return ""
+    async def get_whisper_model(): return None
+    async def load_whisper_model(): return None
 
 from backend.email_tools import create_draft_task
 from backend.analysis import get_mood_health_correlation
@@ -77,6 +81,8 @@ from backend.config import (
     STEWARD_JOURNAL_FOLDER,
     STEWARD_INGEST_FOLDER,
     STEWARD_HEALTH_FOLDER,
+    STEWARD_WORKOUT_FOLDER,
+    STEWARD_NUTRITION_FOLDER,
     BACKUP_PATH, LOGS_PATH,
     MEDICAL_SPEECH_PROMPT,
     MODELS_DIR,          
@@ -129,14 +135,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- WHISPER & MLX SETUP ---
-try:
-    import whisper
-    WHISPER_MODEL = None # Global Model Instance
-except ImportError:
-    whisper = None
-    logger.warning("Whisper library not installed. Voice features disabled.")
-
 # --- GLOBAL INGEST STATE ---
 ingest_process: Optional[Process] = None
 ingest_status_queue: Optional[Queue] = None
@@ -152,15 +150,9 @@ async def lifespan(app: FastAPI):
     # Init MLX LLM (Chat Model)
     asyncio.create_task(init_llm())
 
-    # Pre-load Whisper Model (Prevents SegFaults during runtime)
-    global WHISPER_MODEL
-    if whisper:
-        try:
-            logger.info("Loading Whisper model (small.en)...")
-            WHISPER_MODEL = whisper.load_model("small.en")
-            logger.info("✅ Whisper Model Loaded.")
-        except Exception as e:
-            logger.error(f"Failed to load Whisper: {e}")
+    # Pre-load MLX Whisper Model
+    # This prevents blocking the main thread during heavy model loads
+    asyncio.create_task(load_whisper_model())
 
     # Start Scheduler
     try:
@@ -306,6 +298,69 @@ async def api_get_models():
                 
     return {"models": models}
 
+# === FILE SYSTEM ENDPOINTS (FIXED) ===
+@app.get("/api/folders")
+async def api_get_folders():
+    return {"folders": await get_folders()}
+
+@app.get("/api/files/{folder}")
+async def api_get_files(folder: str):
+    files = await get_files_in_folder(folder)
+    return {"files": files}
+
+# === CHAT SESSION ENDPOINTS (FIXED) ===
+@app.get("/api/chat/sessions")
+async def api_get_sessions():
+    return {"sessions": await get_sessions()}
+
+@app.post("/api/chat/session")
+async def api_create_session():
+    # Create new session with default name
+    session = await create_session("New Session")
+    return {"session": session}
+
+@app.delete("/api/chat/session/{session_id}")
+async def api_delete_session(session_id: int):
+    await delete_session(session_id)
+    return {"status": "success"}
+
+class RenameSessionPayload(BaseModel): name: str
+@app.put("/api/chat/session/{session_id}")
+async def api_rename_session(session_id: int, payload: RenameSessionPayload):
+    await update_chat_session_name(session_id, payload.name)
+    return {"status": "success"}
+
+@app.get("/api/chat/history/{session_id}")
+async def api_get_chat_history(session_id: int):
+    # Retrieve full history including metadata/sources
+    history = await get_chat_history(session_id, lightweight=False)
+    return {"messages": history}
+
+# === DASHBOARD ENDPOINTS (FIXED) ===
+@app.get("/api/steward/dashboard")
+async def api_steward_dashboard_data():
+    return {
+        "suggestions": await get_latest_suggestion(),
+        "tasks": await get_pending_tasks(),
+        "events": await get_weeks_events_structured(),
+        # Finance mock if real sync is not configured
+        "finance": { 
+            "summary": "Finance sync pending", 
+            "budget_used": "0%" 
+        } 
+    }
+
+@app.get("/api/steward/dashboard/health")
+async def api_steward_dashboard_health():
+    # Returns latest 7 days for the sparklines
+    return {"health_metrics": await get_recent_health_metrics_structured(7)}
+
+class TaskStatusPayload(BaseModel): status: str
+@app.post("/api/steward/task/{tid}")
+async def api_update_task(tid: int, payload: TaskStatusPayload):
+    await update_task_status(tid, payload.status)
+    return {"status": "success"}
+
 # === ER CLINICAL AID ENDPOINTS ===
 class ERPatientPayload(BaseModel):
     room: str
@@ -345,8 +400,10 @@ async def api_er_status(pid: int):
 
 @app.post("/api/er/update_audio/{pid}")
 async def api_er_update_audio(pid: int, file: UploadFile = File(...)):
-    if not WHISPER_MODEL: 
-        raise HTTPException(status_code=503, detail="Whisper unavailable.")
+    # Lazy load or check status
+    model = await get_whisper_model()
+    if not model: 
+        raise HTTPException(status_code=503, detail="Whisper unavailable (Loading or Missing).")
         
     temp_path = Path(tempfile.gettempdir()) / f"er_audio_{pid}_{datetime.now().timestamp()}.webm"
     try:
@@ -355,7 +412,9 @@ async def api_er_update_audio(pid: int, file: UploadFile = File(...)):
             
         def _transcribe():
             # USES MEDICAL PROMPT FOR ACCURACY
-            return WHISPER_MODEL.transcribe(str(temp_path), language="en", fp16=False, initial_prompt=MEDICAL_SPEECH_PROMPT)
+            # Note: mlx_whisper wrapper will strip kwargs it doesn't support if strict, 
+            # but our wrapper supports 'initial_prompt'
+            return model.transcribe(str(temp_path), initial_prompt=MEDICAL_SPEECH_PROMPT)
             
         res = await asyncio.to_thread(_transcribe)
         transcript = res.get("text", "").strip()
@@ -392,173 +451,117 @@ async def api_run_finance_sync(): asyncio.create_task(run_finance_sync()); retur
 @app.post("/api/steward/run_med_news_sync")
 async def api_run_med_news_sync(): asyncio.create_task(run_med_news_sync()); return {"status": "success", "message": "EM News sync started."}
 
+# === VOICE & JOURNALING ===
+
+class NotePayload(BaseModel):
+    category: str
+    content: str
+
+@app.post("/api/steward/transcribe_temp")
+async def api_transcribe_temp(file: UploadFile = File(...)):
+    """Transcribes audio without saving it, for user review."""
+    # Lazy load if needed
+    model = await get_whisper_model()
+    if not model: 
+        raise HTTPException(status_code=503, detail="Whisper unavailable (Loading or Missing).")
+        
+    temp_path = Path(tempfile.gettempdir()) / f"temp_transcribe_{datetime.now().timestamp()}.webm"
+    try:
+        async with aiofiles.open(temp_path, "wb") as f:
+            while chunk := await file.read(UPLOAD_CHUNK_SIZE): await f.write(chunk)
+            
+        def _transcribe():
+            return model.transcribe(str(temp_path))
+            
+        res = await asyncio.to_thread(_transcribe)
+        transcript = res.get("text", "").strip()
+        return {"transcript": transcript}
+    finally:
+        if temp_path.exists(): os.remove(temp_path)
+
+@app.post("/api/steward/save_note")
+async def api_save_note(p: NotePayload):
+    """Saves text to a specific folder based on category."""
+    settings = await get_all_settings()
+    
+    # Map Category to Folder Key
+    # Defaults to Journal if unknown
+    folder_key_map = {
+        "Nutrition": "steward_nutrition_folder",
+        "Workout": "steward_workout_folder",
+        "Journal": "steward_journal_folder",
+        "Reminder": "steward_reminders_folder",
+        "Inbox": "steward_ingest_folder"
+    }
+    
+    # Default folder names if not in settings
+    default_folders = {
+        "Nutrition": STEWARD_NUTRITION_FOLDER,
+        "Workout": STEWARD_WORKOUT_FOLDER,
+        "Journal": STEWARD_JOURNAL_FOLDER,
+        "Reminder": STEWARD_REMINDERS_FOLDER,
+        "Inbox": STEWARD_INGEST_FOLDER
+    }
+    
+    folder_key = folder_key_map.get(p.category, "steward_journal_folder")
+    folder_name = settings.get(folder_key, default_folders.get(p.category, STEWARD_JOURNAL_FOLDER))
+    
+    # Construct Path
+    path = DOCS_PATH / folder_name
+    path.mkdir(parents=True, exist_ok=True)
+    
+    # File naming: 2024-01-01.md for logs, or specific files for others
+    filename = f"{datetime.now().strftime('%Y-%m-%d')}.md"
+    if p.category == "Reminder": filename = "reminders.txt"
+    if p.category == "Inbox": filename = f"note_{datetime.now().strftime('%H%M%S')}.md"
+    
+    file_path = path / filename
+    
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    
+    # Append Mode
+    async with aiofiles.open(file_path, "a", encoding="utf-8") as f:
+        if p.category == "Reminder":
+            await f.write(f"\n[ ] {p.content.strip()}")
+            # Also sync to Apple Reminders if applicable
+            try:
+                await asyncio.to_thread(add_reminder_to_app, p.content.strip(), "Inbox")
+            except: pass
+        else:
+            await f.write(f"\n\n### {p.category} Entry @ {timestamp}\n{p.content.strip()}\n")
+            
+    # Trigger ingest to update indexes
+    await trigger_ingest_logic()
+    
+    return {"status": "success"}
+
 class TaskPayload(BaseModel): task: str
 class JournalPayload(BaseModel): content: str
 @app.post("/api/steward/add_task")
 async def api_add_steward_task(payload: TaskPayload):
-    settings = await get_all_settings()
-    folder = settings.get("steward_reminders_folder", STEWARD_REMINDERS_FOLDER)
-    path = DOCS_PATH / folder / "reminders.txt"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiofiles.open(path, "a", encoding="utf-8") as f: await f.write(f"{payload.task.strip()}\n")
-    try:
-        success = await asyncio.to_thread(add_reminder_to_app, payload.task, "Inbox")
-        msg = "Task added to File & Apple Reminders." if success else "Task added to File only."
-    except: msg = "Task added to File only."
-    await trigger_ingest_logic() # Trigger Ingest
-    return {"status": "success", "message": msg}
+    # Kept for backward compatibility with API helpers
+    return await api_save_note(NotePayload(category="Reminder", content=payload.task))
 
 @app.post("/api/steward/add_journal")
 async def api_add_steward_journal(payload: JournalPayload):
-    settings = await get_all_settings()
-    folder = settings.get("steward_journal_folder", STEWARD_JOURNAL_FOLDER)
-    path = DOCS_PATH / folder / datetime.now().strftime('%Y-%m-%d.md')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    entry = f"\n\n### Entry @ {datetime.now().strftime('%H:%M:%S')}\n{payload.content.strip()}\n"
-    async with aiofiles.open(path, "a", encoding="utf-8") as f: await f.write(entry)
-    await trigger_ingest_logic() # Trigger Ingest
-    return {"status": "success", "message": "Journal added."}
-
-@app.post("/api/upload_and_transcribe/{folder}")
-async def api_upload_and_transcribe(folder: str, file: UploadFile = File(...)):
-    if not WHISPER_MODEL: raise HTTPException(status_code=503, detail="Whisper unavailable.")
-    
-    ingest_folder = (await get_all_settings()).get("steward_ingest_folder", STEWARD_INGEST_FOLDER)
-    path = DOCS_PATH / ingest_folder
-    path.mkdir(parents=True, exist_ok=True)
-    safe_name = file.filename.replace('/', '_').replace('\\', '_')
-    temp_path = path / f"temp_{safe_name}"
-    
-    async with aiofiles.open(temp_path, "wb") as f:
-        while chunk := await file.read(UPLOAD_CHUNK_SIZE): await f.write(chunk)
-    
-    txt_path = path / (os.path.splitext(safe_name)[0] + ".txt")
-    try:
-        def _transcribe():
-            # USES MEDICAL PROMPT FOR ACCURACY
-            return WHISPER_MODEL.transcribe(str(temp_path), verbose=False, language="en", fp16=False, initial_prompt=MEDICAL_SPEECH_PROMPT)
-            
-        res = await asyncio.to_thread(_transcribe)
-        text = res.get("text", "").strip()
-        header = f"# Voice Memo ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n\n"
-        
-        async with aiofiles.open(txt_path, "w", encoding="utf-8") as f: await f.write(header + text)
-        await trigger_ingest_logic() # Trigger Ingest
-    finally:
-        if temp_path.exists(): os.remove(temp_path)
-    return {"status": "success", "message": "Transcribed."}
-
-class DailyHealthPayload(BaseModel):
-    date: str
-    steps: Optional[float] = 0.0
-    active_calories: Optional[float] = 0.0
-    weight: Optional[float] = 0.0
-    resting_hr: Optional[float] = 0.0
-    sleep_hours: Optional[float] = 0.0
-
-@app.post("/api/ingest/apple_health")
-async def api_ingest_apple_health(payload: DailyHealthPayload):
-    async with get_db_connection() as conn:
-        await conn.execute("""
-            INSERT INTO health_metrics (
-                date, source, steps_count, active_calories, 
-                weight_kg, resting_hr, sleep_total_duration
-            ) VALUES (?, 'apple_shortcut', ?, ?, ?, ?, ?)
-            ON CONFLICT(date) DO UPDATE SET
-                steps_count=excluded.steps_count,
-                active_calories=excluded.active_calories,
-                weight_kg=excluded.weight_kg,
-                resting_hr=excluded.resting_hr,
-                sleep_total_duration=excluded.sleep_total_duration
-        """, (payload.date, payload.steps, payload.active_calories, payload.weight, payload.resting_hr, f"{payload.sleep_hours} hr"))
-        await conn.commit()
-
-    settings = await get_all_settings()
-    path = DOCS_PATH / settings.get("steward_health_folder", STEWARD_HEALTH_FOLDER)
-    path.mkdir(parents=True, exist_ok=True)
-    async with aiofiles.open(path / f"health_log_{payload.date}.md", "w", encoding="utf-8") as f:
-        await f.write(f"# Health Log: {payload.date}\n- Steps: {payload.steps}\n- Calories: {payload.active_calories}\n- Weight: {payload.weight} lbs\n- Sleep: {payload.sleep_hours} hrs\n- Resting HR: {payload.resting_hr} bpm\n")
-    
-    await trigger_ingest_logic() # Trigger Ingest
-    return {"status": "success", "message": "Health data saved."}
-
-@app.get("/api/backup/export")
-async def api_backup_export():
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        if DB_STEWARD_PATH.exists(): zf.write(DB_STEWARD_PATH, DB_STEWARD_PATH.name)
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="application/zip", headers={'Content-Disposition': 'attachment; filename="backup.zip"'})
-
-@app.post("/api/backup/import")
-async def api_backup_import(file: UploadFile = File(...)):
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp.write(await file.read()); tmp_path = tmp.name
-    try:
-        with zipfile.ZipFile(tmp_path, 'r') as zf: zf.extractall(path=BASE_DIR)
-        await init_db()
-        return {"status": "success"}
-    finally: os.remove(tmp_path)
-
-class TaskUpdate(BaseModel): status: str
-@app.get("/api/steward/dashboard")
-async def api_get_dashboard():
-    settings = await get_all_settings()
-    return {
-        "suggestions": await get_latest_suggestion(),
-        "tasks": await get_pending_tasks(),
-        "events": await get_weeks_events_structured(),
-        "journals": await get_recent_journals_structured(),
-        "finance": await get_finance_structured(settings)
-    }
-
-@app.get("/api/steward/dashboard/memories")
-async def api_get_memories(): return {"memories": await get_journal_memories()}
-@app.get("/api/steward/dashboard/health")
-async def api_get_health(): return {"health_metrics": await get_recent_health_metrics_structured()}
-@app.post("/api/steward/task/{tid}")
-async def api_update_task(tid: int, payload: TaskUpdate): await update_task_status(tid, payload.status); return {"status": "success"}
-
-@app.get("/api/folders")
-async def list_folders():
-    if not DOCS_PATH.exists(): DOCS_PATH.mkdir(parents=True)
-    ign = {"chroma_db", "whoosh_index", "steward.db", "venv", "node_modules", ".git", ".trash", "models"}
-    return {"folders": sorted([d.name for d in DOCS_PATH.iterdir() if d.is_dir() and not d.name.startswith('.') and d.name not in ign])}
-
-@app.get("/api/files/{folder}")
-async def list_files(folder: str):
-    col = sanitize_collection_name(folder)
-    path = DOCS_PATH / folder
-    db_files = set()
-    try:
-        async with get_db_connection() as conn:
-            async for row in await conn.execute("SELECT file_name FROM documents WHERE collection_name=? AND status='active'", (col,)): db_files.add(row['file_name'])
-    except: pass
-    files = []
-    if path.exists():
-        for f in path.rglob("*"):
-            if f.is_file() and not f.name.startswith('.'): files.append({"name": f.name, "status": "synced" if f.name in db_files else "pending"})
-    return {"files": [{"name": "all", "status": "synced"}] + sorted(files, key=lambda x: x['name'])}
-
-@app.get("/api/chat/sessions")
-async def api_chat_sessions(): return {"sessions": await get_sessions()}
-@app.post("/api/chat/session")
-async def api_new_chat(): return {"session": await create_session(f"Chat {datetime.now().strftime('%m/%d %H:%M')}")}
-@app.get("/api/chat/history/{sid}")
-async def api_chat_history(sid: int): return {"messages": await get_chat_history(sid)}
-class RenamePayload(BaseModel): name: str
-@app.put("/api/chat/session/{sid}")
-async def api_rename_chat(sid: int, p: RenamePayload): await update_chat_session_name(sid, p.name); return {"status": "success"}
-@app.delete("/api/chat/session/{sid}")
-async def api_delete_chat(sid: int): await delete_session(sid); return {"status": "success"}
+    # Kept for backward compatibility
+    return await api_save_note(NotePayload(category="Journal", content=payload.content))
 
 @app.post("/api/upload/{folder}")
-async def api_upload(folder: str, file: UploadFile = File(...)):
-    path = DOCS_PATH / folder / file.filename
-    path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiofiles.open(path, "wb") as f:
-        while chunk := await file.read(UPLOAD_CHUNK_SIZE): await f.write(chunk)
-    await trigger_ingest_logic() # Trigger Ingest
+async def api_upload(folder: str, files: list[UploadFile] = File(...)):
+    """Handles multiple file uploads from the chat input."""
+    # Ensure the target folder exists
+    ingest_folder = folder if folder != "all" else (await get_all_settings()).get("steward_ingest_folder", STEWARD_INGEST_FOLDER)
+    path = DOCS_PATH / ingest_folder
+    path.mkdir(parents=True, exist_ok=True)
+    
+    for file in files:
+        file_path = path / file.filename
+        async with aiofiles.open(file_path, "wb") as f:
+            while chunk := await file.read(UPLOAD_CHUNK_SIZE): 
+                await f.write(chunk)
+                
+    await trigger_ingest_logic() 
     return {"status": "success"}
 
 @app.get("/api/document/preview/{folder}/{filename}")
@@ -629,7 +632,9 @@ async def api_voice_command(cmd: VoiceCommand):
 @app.websocket("/ws/audio")
 async def ws_audio(ws: WebSocket):
     await ws.accept()
-    if not WHISPER_MODEL: await ws.close(code=1011, reason="Whisper unavailable"); return
+    # Lazy load for WebSocket too
+    model = await get_whisper_model()
+    if not model: await ws.close(code=1011, reason="Whisper unavailable"); return
     
     temp_audio_path = Path(tempfile.gettempdir()) / f"stream_{datetime.now().timestamp()}.webm"
     try:
@@ -641,8 +646,7 @@ async def ws_audio(ws: WebSocket):
                 await f.flush()
                 
                 def _transcribe():
-                    # USES MEDICAL PROMPT FOR ACCURACY
-                    return WHISPER_MODEL.transcribe(str(temp_audio_path), language="en", fp16=False, initial_prompt=MEDICAL_SPEECH_PROMPT)
+                    return model.transcribe(str(temp_audio_path), initial_prompt=MEDICAL_SPEECH_PROMPT)
                 
                 result = await asyncio.to_thread(_transcribe)
                 text = result.get("text", "").strip()
@@ -665,10 +669,17 @@ async def ws_rag(ws: WebSocket):
             persona = data.get("persona", "Vault")
             lower_q = query.lower()
             
+            # Persist user message
             await add_chat_message(sid, "user", query, persona="User")
 
+            # --- FETCH HISTORY ---
+            # Retrieve recent conversation context for continuity
+            history_objs = await get_chat_history(sid, lightweight=True)
+            # Format for LLM: [{"role": "user", "content": "..."}, ...]
+            # Take last 10 messages for context
+            chat_history = [{"role": h['role'], "content": h['content']} for h in history_objs[-10:]]
+
             # === 1. STEWARD AGENT (Full Tools) ===
-            # UPDATED: Route all "Active" personas through the agent to enable tools/scoped RAG
             AGENT_PERSONAS = {"Steward", "Clinical", "CFO", "Coach", "Mentor", "Vault"}
             
             if persona in AGENT_PERSONAS:
@@ -676,7 +687,8 @@ async def ws_rag(ws: WebSocket):
                 collected_sources = []
                 
                 # Check for dict tokens (Sources) vs string tokens (Text)
-                async for token in agent_stream(query, sid, persona, folder, filename): 
+                # Now passing chat_history to the agent!
+                async for token in agent_stream(query, sid, persona, folder, filename, history=chat_history): 
                     if isinstance(token, dict) and token.get("type") == "sources":
                          # Forward the structured source data to the frontend
                          await ws.send_json(token)
@@ -699,17 +711,17 @@ async def ws_rag(ws: WebSocket):
             # === 2. CHAT (Bare LLM) ===
             if persona == "Chat":
                 full_resp = ""
-                async for token in generate_bare_stream(query, [], persona_name="Chat"):
+                async for token in generate_bare_stream(query, chat_history, persona_name="Chat"):
                     await ws.send_json({"type": "token", "data": token})
                     full_resp += token
                 await add_chat_message(sid, "assistant", full_resp, persona="Chat")
                 await ws.send_json({"type": "done"})
                 continue
             
-            # Fallback (Should typically be covered by AGENT_PERSONAS)
+            # Fallback
             full_resp = ""
             collected_sources = []
-            async for token in agent_stream(query, sid, persona, folder, filename):
+            async for token in agent_stream(query, sid, persona, folder, filename, history=chat_history):
                 if isinstance(token, dict) and token.get("type") == "sources":
                     await ws.send_json(token)
                     collected_sources = token.get("data", [])

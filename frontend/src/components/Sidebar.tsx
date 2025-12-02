@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { 
-  Plus, LayoutDashboard, Settings, FolderOpen, Trash2,
+  Plus, LayoutDashboard, FolderOpen, Trash2,
   Stethoscope, FileText, ChevronRight
 } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -37,9 +37,8 @@ const Sidebar: React.FC<{ isOpen: boolean; setIsOpen: (o: boolean) => void }> = 
 
   const handleDeleteSession = async (e: React.MouseEvent, sessionId: number) => {
       e.stopPropagation();
-      if (confirm('Delete this session?')) {
-          await deleteSession(sessionId);
-      }
+      // Confirmation removed as requested
+      await deleteSession(sessionId);
   };
 
   const handleSessionClick = (id: number) => {
@@ -157,22 +156,14 @@ const Sidebar: React.FC<{ isOpen: boolean; setIsOpen: (o: boolean) => void }> = 
              Clinical Aid
            </button>
 
-           <div className="grid grid-cols-2 gap-2">
-              <button 
-                onClick={() => navigate('/admin')} 
-                className="flex flex-col items-center gap-2 p-3 text-xs font-bold uppercase tracking-wider text-txt-tertiary hover:text-txt-primary hover:bg-surface rounded-xl transition-all active:scale-95"
-              >
-                <LayoutDashboard className="w-5 h-5" />
-                Console
-              </button>
-              <button 
-                onClick={() => navigate('/admin/settings')} 
-                className="flex flex-col items-center gap-2 p-3 text-xs font-bold uppercase tracking-wider text-txt-tertiary hover:text-txt-primary hover:bg-surface rounded-xl transition-all active:scale-95"
-              >
-                <Settings className="w-5 h-5" />
-                Settings
-              </button>
-           </div>
+           {/* Console/Settings Combined Link */}
+           <button 
+             onClick={() => navigate('/admin')} 
+             className="w-full flex items-center justify-center gap-2 p-3 text-xs font-bold uppercase tracking-wider text-txt-tertiary hover:text-txt-primary hover:bg-surface rounded-xl transition-all active:scale-95"
+           >
+             <LayoutDashboard className="w-5 h-5" />
+             Console & Settings
+           </button>
         </div>
       </div>
 

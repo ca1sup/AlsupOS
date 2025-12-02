@@ -3,7 +3,7 @@ import json
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from backend.config import DB_PATH
+from backend.config import DB_PATH, DOCS_PATH, SUPPORTED_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +292,6 @@ Neuro/Ext: <>
 Results:
 <Test> - <Result> - <Interp>""",
 
-        # ... (Rest of defaults remain the same) ...
         "med_news_refresher_prompt": """Generate one single, high-yield clinical pearl for an Emergency Medicine physician. Be concise. Example: 'For PEA, remember the H's and T's...'"""
     }
 
@@ -404,14 +403,47 @@ async def update_task_status(tid, status):
         await db.execute("UPDATE tasks SET status = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?", (status, tid))
         await db.commit()
 
-# --- FILE SYSTEM ROUTES ---
+# --- FILE SYSTEM ROUTES (Dynamic) ---
 async def get_folders():
-    return ["all", "journal", "health", "finance", "web", "context", "reminders"]
+    """
+    Returns a list of folders in the DOCS_PATH.
+    Always includes 'all' as the first option.
+    """
+    folders = ["all"]
+    if DOCS_PATH.exists():
+        for item in DOCS_PATH.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                folders.append(item.name)
+    return folders
 
 async def get_files_in_folder(folder: str):
-    if folder == "journal":
-        return [{"filename": "2024-01-01.md"}, {"filename": "2024-01-02.md"}]
-    return []
+    """
+    Returns a list of files in the specified folder.
+    """
+    files = []
+    
+    if folder == 'all':
+        # Flatten all folders
+        if DOCS_PATH.exists():
+            for item in DOCS_PATH.rglob('*'):
+                if item.is_file() and not item.name.startswith('.') and item.suffix.lower() in SUPPORTED_EXTENSIONS:
+                    files.append({"name": item.name, "status": "synced"})
+    else:
+        # Specific folder (case-insensitive check)
+        target_dir = DOCS_PATH / folder
+        if not target_dir.exists():
+            # Try finding it regardless of case
+            for item in DOCS_PATH.iterdir():
+                if item.is_dir() and item.name.lower() == folder.lower():
+                    target_dir = item
+                    break
+        
+        if target_dir.exists() and target_dir.is_dir():
+            for item in target_dir.iterdir():
+                if item.is_file() and not item.name.startswith('.') and item.suffix.lower() in SUPPORTED_EXTENSIONS:
+                    files.append({"name": item.name, "status": "synced"})
+                    
+    return files
     
 # --- EVENTS ---
 async def get_todays_events():

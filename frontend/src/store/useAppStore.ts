@@ -43,11 +43,11 @@ const createChatSlice: StateCreator<StoreState, [], [], ChatSlice> = (set, get) 
   currentChart: null,
   medicalSources: [],
   
-  // --- NEW: Persona State ---
+  // --- Persona State ---
   activePersona: 'Steward', 
   setPersona: (p) => set({ activePersona: p }),
 
-  // --- NEW: WebSocket Control ---
+  // --- WebSocket Control ---
   activeWebSocket: null,
 
   stopGeneration: () => {
@@ -96,6 +96,9 @@ const createChatSlice: StateCreator<StoreState, [], [], ChatSlice> = (set, get) 
   },
   
   uploadFiles: async (files) => {
+    // 1. Auto-open modal to show progress
+    set({ isIngestModalOpen: true });
+
     const formData = new FormData();
     if (files instanceof FileList) {
         Array.from(files).forEach(f => formData.append('files', f));
@@ -103,11 +106,79 @@ const createChatSlice: StateCreator<StoreState, [], [], ChatSlice> = (set, get) 
         files.forEach(f => formData.append('files', f));
     }
     
-    try {
-        await fetch('/api/upload', { method: 'POST', body: formData });
-        get().fetchFolders();
-        if (get().selectedFolder !== 'all') get().fetchFolderFiles(get().selectedFolder);
-    } catch (e) { console.error(e); }
+    // Default to 'Inbox' if selected folder is 'all', otherwise use selected
+    const targetFolder = get().selectedFolder === 'all' ? 'Inbox' : get().selectedFolder;
+    
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/api/upload/${encodeURIComponent(targetFolder)}`);
+
+        // Track Progress
+        xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) {
+                const percent = Math.round((event.loaded / event.total) * 100);
+                set({ 
+                    ingestProgress: { 
+                        message: `Uploading to ${targetFolder}...`, 
+                        percent: percent, 
+                        running: true 
+                    } 
+                });
+            }
+        };
+
+        xhr.onload = async () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                set({ 
+                    ingestProgress: { 
+                        message: 'Processing...', 
+                        percent: 100, 
+                        running: true 
+                    } 
+                });
+                
+                // Refresh data
+                await get().fetchFolders();
+                if (get().selectedFolder !== 'all') {
+                    await get().fetchFolderFiles(get().selectedFolder);
+                }
+                
+                // Complete
+                set({ 
+                    ingestProgress: { 
+                        message: 'Done', 
+                        percent: 100, 
+                        running: false 
+                    } 
+                });
+                resolve();
+            } else {
+                console.error("Upload failed", xhr.responseText);
+                set({ 
+                    ingestProgress: { 
+                        message: 'Error uploading', 
+                        percent: 0, 
+                        running: false 
+                    } 
+                });
+                reject(new Error(xhr.statusText));
+            }
+        };
+
+        xhr.onerror = () => {
+            console.error("Network error during upload");
+            set({ 
+                ingestProgress: { 
+                    message: 'Network Error', 
+                    percent: 0, 
+                    running: false 
+                } 
+            });
+            reject(new Error("Network Error"));
+        };
+
+        xhr.send(formData);
+    });
   },
 
   uploadVoiceMemo: async (blob, target) => {
@@ -125,15 +196,18 @@ const createChatSlice: StateCreator<StoreState, [], [], ChatSlice> = (set, get) 
 
   ingestUrl: async (url: string) => {
       try {
+          set({ ingestProgress: { message: 'Fetching URL...', percent: 50, running: true } });
           const res = await fetch('/api/ingest/url', { 
               method: 'POST', 
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ url }) 
           });
           if (!res.ok) throw new Error("Failed to ingest URL");
-          get().fetchFolders();
+          await get().fetchFolders();
+          set({ ingestProgress: { message: 'Done', percent: 100, running: false } });
       } catch (e) { 
-          console.error(e); 
+          console.error(e);
+          set({ ingestProgress: { message: 'Error', percent: 0, running: false } }); 
           throw e;
       }
   },
@@ -270,9 +344,6 @@ const createChatSlice: StateCreator<StoreState, [], [], ChatSlice> = (set, get) 
             } else if (data.type === 'done') {
                 ws.close();
                 set({ isLoading: false, activeWebSocket: null });
-                // We do NOT call fetchHistory here to prevent "flicker" 
-                // as the backend might still be persisting the transaction.
-                // The state is already up to date.
             }
         };
         
@@ -304,6 +375,18 @@ const createChatSlice: StateCreator<StoreState, [], [], ChatSlice> = (set, get) 
             body: JSON.stringify({ room, complaint, age_sex })
         });
         get().fetchERPatients();
+      } catch(e) { console.error(e); }
+  },
+
+  deleteERPatient: async (pid: number) => {
+      try {
+          await fetch(`/api/er/patient/${pid}`, { method: 'DELETE' });
+          get().fetchERPatients();
+          // Clear current chart if it matches the deleted ID
+          const current = get().currentChart;
+          if (current && current.patient_id === pid) {
+              set({ currentChart: null });
+          }
       } catch(e) { console.error(e); }
   },
 

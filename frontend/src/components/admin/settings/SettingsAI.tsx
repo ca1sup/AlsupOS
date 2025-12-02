@@ -43,7 +43,7 @@ const SettingsAI: React.FC = () => {
     }
   }, [settings]);
 
-  const handleChange = (key: string, val: string) => {
+  const handleChange = (key: string, val: string | number) => {
     setLocalSettings((prev: any) => ({ ...prev, [key]: val }));
   };
 
@@ -79,6 +79,36 @@ const SettingsAI: React.FC = () => {
           {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
           Update Brain
         </button>
+      </div>
+
+      {/* NEW: Conversation Memory Control */}
+      <div className="bg-surface rounded-2xl p-6 border border-border-invisible shadow-float mb-8">
+          <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-light text-txt-primary flex items-center gap-2">
+                  <Brain size={18} className="text-accent"/> 
+                  Conversation Memory
+              </h3>
+              <span className="text-xs font-mono text-accent bg-accent-dim px-2 py-1 rounded">
+                  {localSettings.memory_depth || 10} Messages
+              </span>
+          </div>
+          <p className="text-xs text-txt-secondary mb-4">
+              Controls how many past messages are sent to the LLM. Higher values improve context but slow down generation.
+          </p>
+          <input 
+              type="range" 
+              min="0" 
+              max="50" 
+              step="1"
+              value={localSettings.memory_depth || 10}
+              onChange={(e) => handleChange('memory_depth', parseInt(e.target.value))}
+              className="w-full h-2 bg-elevated rounded-lg appearance-none cursor-pointer accent-accent hover:accent-white transition-all"
+          />
+          <div className="flex justify-between text-[10px] text-txt-tertiary mt-2 uppercase tracking-wider font-bold">
+              <span>Amnesic (0)</span>
+              <span>Balanced (10)</span>
+              <span>Deep Context (50)</span>
+          </div>
       </div>
 
       {/* Tabs */}

@@ -1,6 +1,7 @@
 import logging
-from typing import Optional
+from typing import Optional, List, Dict
 from backend.rag import perform_rag_query, generate_stream
+from backend.database import get_all_settings
 from backend.config import (
     STEWARD_MEDICAL_FOLDER, 
     STEWARD_FINANCE_FOLDER,
@@ -37,12 +38,15 @@ async def agent_stream(
     session_id: int, 
     persona: str, 
     folder: str, 
-    file: Optional[str] = None
+    file: Optional[str] = None,
+    history: List[Dict[str, str]] = [] 
 ):
     """
     Direct-RAG Pipeline with UI Thinking Blocks & Robust Fallback.
     """
     logger.info(f"Direct RAG Request ({persona}): {query}")
+    
+    settings = await get_all_settings()
     
     # 1. Determine Search Scope
     folders_to_search = []
@@ -140,12 +144,19 @@ Answer the user's question based strictly on the provided context."""
     elif persona == "CFO":
         sys_prompt = STEWARD_FINANCE_PROMPT
 
-    # 5. Stream LLM Response
+    # 5. Determine Memory Depth
+    # Read from settings, default to 10 messages if not set
+    memory_depth = int(settings.get("memory_depth", 10))
+    
+    # Slice the history to respect the user's setting
+    effective_history = history[-memory_depth:] if memory_depth > 0 else []
+
+    # 6. Stream LLM Response
     # Pass LIST of chunks to generate_stream, preventing premature concatenation issues
     async for token in generate_stream(
         query=query, 
         context=final_context_chunks, 
-        history=[], 
+        history=effective_history, # Pass the history!
         persona_name=persona 
     ):
         yield token

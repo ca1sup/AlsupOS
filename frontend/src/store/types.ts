@@ -1,7 +1,6 @@
 export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
-  // UPDATED: Matches backend/agent.py structure
   sources?: { file: string; page?: number; snippet?: string }[];
   persona?: string;
   timestamp?: string;
@@ -22,15 +21,14 @@ export interface HealthMetric {
   sleep_total_duration: string;
 }
 
-// --- UPDATED ER TYPES ---
 export interface ERPatient {
   id: number;
-  room_label: string;      // Fixed: matches ClinicalView
-  chief_complaint: string; // Fixed: matches ClinicalView
+  room_label: string;
+  chief_complaint: string;
   age_sex: string;
   acuity_level?: number;
   status: string;
-  created_at: string;      // Added
+  created_at: string;
 }
 
 export interface ERChart {
@@ -71,7 +69,7 @@ export interface ChatSlice {
   selectedFile: SelectedFile | null; 
   healthStatus: HealthMetric | null;
   erPatients: ERPatient[];
-  currentChart: ERChart | null; // Fixed type
+  currentChart: ERChart | null; 
   medicalSources: any[];
 
   activePersona: string;
@@ -99,6 +97,7 @@ export interface ChatSlice {
   
   fetchERPatients: () => Promise<void>;
   createERPatient: (room: string, complaint: string, age_sex: string) => Promise<void>;
+  deleteERPatient: (pid: number) => Promise<void>; // <--- FIXED: Added this property
   fetchERChart: (pid: number) => Promise<void>;
   submitERAudio: (pid: number, blob: Blob) => Promise<void>;
   archivePatient: (pid: number) => Promise<void>;
@@ -139,7 +138,7 @@ export interface UISlice {
   closeVoiceModal: () => void;
 }
 
-// --- UPDATED SETTINGS SLICE ---
+// --- SETTINGS SLICE ---
 export interface SettingsSlice {
   isInitialized: boolean;
   settings: Record<string, any>;
