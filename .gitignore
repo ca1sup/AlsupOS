@@ -36,3 +36,5 @@ venv_stable/
 node_modules/
 frontend/node_modules/
 __pycache__/
+localhost+1-key.pem
+localhost+1.pem
