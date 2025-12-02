@@ -1,7 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
 import renderMarkdown from '../../lib/markdown';
-import { Activity, Calendar, CheckSquare, CreditCard, Sparkles, Headphones, Loader2, StopCircle } from 'lucide-react';
+import { Activity, Calendar, CheckSquare, CreditCard, Sparkles, Headphones, Loader2, StopCircle, RefreshCw } from 'lucide-react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, CartesianGrid, Tooltip, YAxis } from 'recharts';
+import { useAppStore } from '../../store/useAppStore';
+import { toast } from 'react-toastify';
 
 interface DashboardData {
   suggestions?: { content_private: string };
@@ -11,27 +13,51 @@ interface DashboardData {
 }
 
 const Dashboard: React.FC = () => {
+  const { runJob } = useAppStore();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isRegenerating, setIsRegenerating] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [loadingAudio, setLoadingAudio] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  const loadData = async () => {
+    try {
+      const res = await fetch('/api/steward/dashboard');
+      const json = await res.json();
+      setData(json);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const loadData = async () => {
-      try {
-        const res = await fetch('/api/steward/dashboard');
-        const json = await res.json();
-        setData(json);
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setLoading(false);
-      }
-    };
     loadData();
     return () => { if(audioRef.current) audioRef.current.pause(); };
   }, []);
+
+  const handleRegenerate = async () => {
+    if (isRegenerating) return;
+    setIsRegenerating(true);
+    toast.info("Generating new briefing... (this takes ~10s)");
+    
+    try {
+        await runJob();
+        // Wait 10s for the LLM to finish (local inference takes time)
+        // Then refresh the data
+        setTimeout(async () => {
+            await loadData();
+            toast.success("Briefing updated.");
+            setIsRegenerating(false);
+        }, 10000);
+    } catch (e) {
+        console.error(e);
+        toast.error("Failed to trigger generation.");
+        setIsRegenerating(false);
+    }
+  };
 
   const handlePlayBriefing = async () => {
     if (audioPlaying && audioRef.current) {
@@ -86,17 +112,29 @@ const Dashboard: React.FC = () => {
         
         {/* Daily Briefing */}
         <div className="lg:col-span-2 bg-surface rounded-[24px] p-8 border border-border-invisible shadow-float hover:border-border-subtle transition-all duration-500">
-          <div className="flex items-center gap-4 mb-6 border-b border-border-invisible pb-4">
-            <div className="p-3 bg-elevated rounded-2xl text-accent">
-              <Sparkles className="w-5 h-5" />
+          <div className="flex items-center justify-between mb-6 border-b border-border-invisible pb-4">
+            <div className="flex items-center gap-4">
+                <div className="p-3 bg-elevated rounded-2xl text-accent">
+                <Sparkles className="w-5 h-5" />
+                </div>
+                <h2 className="text-xl font-light text-txt-primary">Daily Briefing</h2>
             </div>
-            <h2 className="text-xl font-light text-txt-primary">Daily Briefing</h2>
+            <button 
+                onClick={handleRegenerate}
+                disabled={isRegenerating}
+                className="p-2 text-txt-tertiary hover:text-accent hover:bg-elevated rounded-xl transition-all active:scale-95 disabled:opacity-50"
+                title="Regenerate Briefing"
+            >
+                <RefreshCw className={`w-5 h-5 ${isRegenerating ? 'animate-spin' : ''}`} />
+            </button>
           </div>
+          
           <div 
-            className="prose prose-invert prose-p:text-txt-body prose-headings:text-txt-primary max-w-none leading-relaxed"
+            className="prose prose-invert prose-p:text-txt-body prose-headings:text-txt-primary max-w-none leading-relaxed min-h-[100px]"
             dangerouslySetInnerHTML={{ __html: renderMarkdown(data.suggestions?.content_private || 'No suggestions for today.') }}
           />
-          <div className="mt-8 pt-6 border-t border-border-invisible flex justify-end">
+          
+          <div className="mt-8 pt-6 border-t border-border-invisible flex justify-end gap-3">
              <button 
                onClick={handlePlayBriefing}
                disabled={loadingAudio}

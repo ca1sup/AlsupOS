@@ -3,7 +3,13 @@ import json
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from backend.config import DB_PATH, DOCS_PATH, SUPPORTED_EXTENSIONS
+from backend.config import (
+    DB_PATH, DOCS_PATH, SUPPORTED_EXTENSIONS,
+    STEWARD_MEDICAL_FOLDER, STEWARD_FINANCE_FOLDER,
+    STEWARD_HEALTH_FOLDER, STEWARD_WORKOUT_FOLDER,
+    STEWARD_MEALPLANS_FOLDER, STEWARD_JOURNAL_FOLDER,
+    STEWARD_CONTEXT_FOLDER
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +207,7 @@ async def init_db():
                 collection_name TEXT,
                 file_name TEXT,
                 file_hash TEXT,
-                file_mtime REAL DEFAULT 0, -- NEW: For Smart Diffing
+                file_mtime REAL DEFAULT 0,
                 last_processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 status TEXT DEFAULT 'active',
                 UNIQUE(collection_name, file_name)
@@ -229,14 +235,77 @@ async def init_db():
             await db.execute("ALTER TABLE er_chart_history ADD COLUMN guidance_version INTEGER DEFAULT 0")
         except Exception: pass
 
-        # NEW: Migration for Smart Diffing
         try:
             await db.execute("ALTER TABLE documents ADD COLUMN file_mtime REAL DEFAULT 0")
         except Exception: pass
 
         await init_personas(db)
         await seed_default_prompts(db)
+        await seed_logic_config(db) # NEW: Seeding the Logic Configuration
         await db.commit()
+
+async def seed_logic_config(db):
+    """Seeds the hardcoded logic maps into the settings table."""
+    
+    # 1. Clinical Logic Map
+    clinical_scenarios = {
+        'chest pain': [
+            "HEART score validation {age_sex}",
+            "chest pain risk stratification emergency department 2024",
+            "acute coronary syndrome diagnosis guidelines"
+        ],
+        'abdominal pain': [
+            "abdominal pain {age_sex} emergency evaluation",
+            "acute abdomen imaging guidelines",
+            "appendicitis clinical decision rules"
+        ],
+        'shortness of breath': [
+            "dyspnea emergency department workup 2024",
+            "pulmonary embolism PERC rule Wells score",
+            "heart failure BNP cutoff emergency"
+        ],
+        'altered mental status': [
+            "altered mental status {age_sex} differential",
+            "delirium workup emergency department",
+            "stroke NIHSS emergency guidelines"
+        ],
+        'sepsis': [
+            "sepsis emergency department antibiotics 2024",
+            "qSOFA score validation",
+            "surviving sepsis campaign guidelines"
+        ]
+    }
+
+    # 2. Persona Scope Map
+    persona_map = {
+        "Clinical": [STEWARD_MEDICAL_FOLDER],
+        "CFO": [STEWARD_FINANCE_FOLDER],
+        "Coach": [STEWARD_HEALTH_FOLDER, STEWARD_WORKOUT_FOLDER, STEWARD_MEALPLANS_FOLDER],
+        "Mentor": [STEWARD_JOURNAL_FOLDER, STEWARD_CONTEXT_FOLDER],
+        "Steward": ["all"],
+        "Vault": ["all"]
+    }
+
+    # 3. Trusted Sites
+    trusted_sites = [
+        "site:wikiem.com", 
+        "site:litfl.com", 
+        "site:mdcalc.com", 
+        "site:uptodate.com",
+        "site:ncbi.nlm.nih.gov",
+        "site:merckmanuals.com"
+    ]
+
+    defaults = {
+        "clinical_scenario_templates": json.dumps(clinical_scenarios, indent=2),
+        "persona_folder_map": json.dumps(persona_map, indent=2),
+        "web_search_trusted_sites": json.dumps(trusted_sites),
+        "tts_voice": "af_heart"
+    }
+
+    for key, val in defaults.items():
+        # INSERT OR IGNORE ensures we don't overwrite user edits on restart
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
 
 async def seed_default_prompts(db):
     """Seeds the editable prompts into settings if they don't exist."""

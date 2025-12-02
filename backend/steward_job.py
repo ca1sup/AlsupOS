@@ -68,6 +68,7 @@ async def run_daily_summary():
         Please summarize my day and suggest improvements.
         """
         
+        # Robust formatting: provide all potential keys
         prompt = template.format(
             current_date=current_date_str,
             todays_events=todays_events_str,
@@ -76,6 +77,8 @@ async def run_daily_summary():
             completed=completed_str,
             recent_journals=journal_context,
             health_summary=health_str,
+            family_context=facts_str, # Fix: Added this key
+            
             # Fill placeholders if they exist in the template but not calculated here
             finance_summary="Finance sync pending",
             workout_plan="Workout pending",

@@ -1,4 +1,3 @@
-
 import os
 import re
 from pathlib import Path
@@ -49,8 +48,11 @@ STT_MODEL_NAME = "mlx-community/whisper-large-v3-turbo"
 
 # TTS: Local Kokoro Model (82M params, High Fidelity)
 TTS_MODEL_NAME = "mlx-community/Kokoro-82M-bf16"
-# Voices: af_heart, af_bella, af_nicole, af_sarah, af_sky, am_adam, am_michael, bf_emma, bf_isabella
-TTS_VOICE = "af_heart" 
+
+# Valid Voices for Kokoro-82M:
+# American (a): af_heart, af_bella, af_nicole, af_sarah, af_sky, am_adam, am_michael
+# British (b): bf_emma, bf_isabella, bm_lewis
+TTS_VOICE = "am_adam" 
 
 # === CLINICAL SETTINGS ===
 # Primes Whisper to recognize medical terms correctly

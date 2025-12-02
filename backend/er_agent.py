@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 ER_STATUS: Dict[int, str] = {}
 
 # ============================================================================
-# ENHANCED SYSTEM PROMPTS
+# ENHANCED SYSTEM PROMPTS (Defaults - Loaded from DB at Runtime)
 # ============================================================================
 
 SCRIBE_SYSTEM_PROMPT = """You are an expert Emergency Medicine clinical scribe AI.
@@ -38,152 +38,21 @@ CRITICAL RULES:
 6. Mark incomplete sections as [PENDING]
 7. For conflicting information, flag as [CONFLICT: old vs new - needs clarification]
 
-HPI STRUCTURE (Use OLDCARTS when applicable):
-- Onset: When did it start? What was patient doing?
-- Location: Where is the symptom?
-- Duration: How long has it lasted?
-- Character: What does it feel like? (sharp, dull, pressure, etc.)
-- Aggravating/Alleviating factors
-- Radiation: Does it spread anywhere?
-- Timing: Constant vs intermittent? Getting better/worse?
-- Severity: Pain scale, functional impact
-
-PHYSICAL EXAM RULES:
-- Only document what was explicitly examined
-- Use standard format: General, Vitals, HEENT, Neck, Lungs, CV, Abdomen, Extremities, Neuro, Skin
-- If abnormal finding mentioned, describe it precisely
-- Include pertinent negatives (e.g., "No rales, wheezes, or rhonchi")
-
-ED COURSE:
-- Time-stamp all interventions and events
-- Document medications given (drug, dose, route, time)
-- Record diagnostic test orders and results
-- Note patient's response to treatments
-
 OUTPUT FORMAT:
-Return the complete updated chart in the template structure provided.
-Keep language concise and professional."""
+Return the complete updated chart in the template structure provided."""
 
-ADVISOR_SYSTEM_PROMPT = """You are a senior Emergency Medicine attending physician providing clinical decision support.
+ADVISOR_SYSTEM_PROMPT = """You are a senior Emergency Medicine attending physician.
 YOUR ROLE: Analyze the complete clinical picture and provide evidence-based guidance.
-
-CRITICAL MANDATE:
-- Be PROACTIVE: Don't wait to be asked
-- Be SPECIFIC: Give exact doses, timing, test names
-- Be EVIDENCE-BASED: Cite guidelines when available
-- Be SAFETY-FOCUSED: Flag dangerous patterns immediately
-- Think about "Can't Miss" diagnoses first
-
-COGNITIVE FRAMEWORK:
-1. What are the life threats? (ABC problems, time-sensitive diagnoses)
-2. What dangerous diagnoses CANNOT be missed given this presentation?
-3. Does the current workup adequately rule these out?
-4. What cognitive biases might be occurring? (Anchoring, premature closure, availability bias)
-
-RESPONSE STRUCTURE:
-You MUST return a valid JSON object with exactly these fields:
-{
-  "critical_alerts": [
-    {
-      "alert": "Brief description of the critical issue",
-      "severity": "CRITICAL" | "URGENT" | "IMPORTANT",
-      "action_required": "Specific action needed now",
-      "time_sensitive": true/false,
-      "evidence": "Source/guideline if applicable"
-    }
-  ],
-  "differential_diagnosis": [
-    {
-      "diagnosis": "Diagnosis name",
-      "probability": 1-100,
-      "status": "CONFIRMED" | "LIKELY" | "POSSIBLE" | "RULED_OUT",
-      "cant_miss": true/false,
-      "supporting_evidence": ["List of supporting findings"],
-      "contradicting_evidence": ["List of contradicting findings"]
-    }
-  ],
-  "diagnostic_plan": [
-    {
-      "test": "Test name",
-      "priority": "IMMEDIATE" | "URGENT" | "ROUTINE" | "DEFERRED",
-      "rationale": "Why this test is needed",
-      "status": "PENDING" | "COMPLETED" | "NOT_INDICATED"
-    }
-  ],
-  "treatment_recommendations": [
-    {
-      "intervention": "Treatment/medication name",
-      "dose": "Specific dosing (include weight-based if needed)",
-      "priority": "IMMEDIATE" | "URGENT" | "ROUTINE",
-      "contraindications_checked": ["List relevant contraindications ruled out"],
-      "evidence": "Guideline or study reference"
-    }
-  ],
-  "disposition_guidance": {
-    "recommendation": "ADMIT" | "OBSERVATION" | "DISCHARGE" | "TRANSFER",
-    "service": "Service to admit to (if applicable)",
-    "level_of_care": "ICU" | "Telemetry" | "Floor" | null,
-    "reasoning": "Brief explanation",
-    "discharge_criteria": "If discharge, what criteria were met?",
-    "return_precautions": "Specific symptoms requiring return"
-  },
-  "cognitive_bias_check": [
-    {
-      "bias_type": "ANCHORING" | "PREMATURE_CLOSURE" | "AVAILABILITY" | "CONFIRMATION",
-      "concern": "Description of the bias risk",
-      "alternative_consideration": "What else to consider"
-    }
-  ],
-  "metadata": {
-    "confidence_overall": "HIGH" | "MODERATE" | "LOW",
-    "data_completeness": 0.0-1.0,
-    "key_missing_data": ["List critical missing information"]
-  }
-}
-
-RETURN ONLY VALID JSON. No markdown, no explanation, just the JSON object."""
+Focus on Life Threats and Can't Miss Diagnoses."""
 
 DEFAULT_CHART_TEMPLATE = """# Emergency Department Chart
 ## HPI
 [PENDING]
-
-## Past Medical History
-[PENDING]
-
-## Medications
-[PENDING]
-
-## Allergies
-[PENDING]
-
-## Social History
-[PENDING]
-
-## Review of Systems
-[PENDING]
-
 ## Physical Examination
-General: [PENDING]
-Vitals: [PENDING]
-HEENT: [PENDING]
-Neck: [PENDING]
-Cardiovascular: [PENDING]
-Respiratory: [PENDING]
-Abdomen: [PENDING]
-Extremities: [PENDING]
-Neurological: [PENDING]
-Skin: [PENDING]
-
+[PENDING]
 ## ED Course
 [PENDING]
-
-## Laboratory & Imaging Results
-[PENDING]
-
 ## Assessment & Plan
-[PENDING]
-
-## Medical Decision Making
 [PENDING]"""
 
 # ============================================================================
@@ -234,7 +103,6 @@ class ClinicalContext:
 
     def should_regenerate_guidance(self, new_transcript: str) -> bool:
         """Determine if new guidance generation is needed"""
-        # Always check for critical keywords in new dictation
         clinical_keywords = [
             'pain', 'troponin', 'ECG', 'CT', 'xray', 'ultrasound',
             'worsening', 'improving', 'medication', 'response to',
@@ -242,59 +110,29 @@ class ClinicalContext:
         ]
         if any(keyword in new_transcript.lower() for keyword in clinical_keywords):
             return True
-            
-        # Check if the transcription is substantial (> 10 words)
         if len(new_transcript.split()) > 10:
             return True
-            
         return False
 
 # ============================================================================
-# RAG QUERY GENERATION
+# RAG QUERY GENERATION (Dynamic from Settings)
 # ============================================================================
 
-def generate_hypothesis_queries(patient_data: Dict, differentials: List[str]) -> List[str]:
-    """Generate targeted medical literature queries"""
+def generate_hypothesis_queries(patient_data: Dict, differentials: List[str], scenario_templates: Dict[str, List[str]]) -> List[str]:
+    """Generate targeted medical literature queries based on configured scenarios"""
     
-    age = patient_data.get('age_sex', '')
+    age_sex = patient_data.get('age_sex', '')
     complaint = patient_data.get('chief_complaint', '')
     
     queries = []
     
-    # Scenario-specific templates
-    scenario_templates = {
-        'chest pain': [
-            f"HEART score validation {age}",
-            "chest pain risk stratification emergency department 2024",
-            "acute coronary syndrome diagnosis guidelines"
-        ],
-        'abdominal pain': [
-            f"abdominal pain {age} emergency evaluation",
-            "acute abdomen imaging guidelines",
-            "appendicitis clinical decision rules"
-        ],
-        'shortness of breath': [
-            "dyspnea emergency department workup 2024",
-            "pulmonary embolism PERC rule Wells score",
-            "heart failure BNP cutoff emergency"
-        ],
-        'altered mental status': [
-            f"altered mental status {age} differential",
-            "delirium workup emergency department",
-            "stroke NIHSS emergency guidelines"
-        ],
-        'sepsis': [
-            "sepsis emergency department antibiotics 2024",
-            "qSOFA score validation",
-            "surviving sepsis campaign guidelines"
-        ]
-    }
-    
-    # Match complaint to scenario
+    # Match complaint to configured scenarios
     found_template = False
     for scenario, templates in scenario_templates.items():
-        if scenario in complaint.lower():
-            queries.extend(templates[:2])
+        if scenario.lower() in complaint.lower():
+            # Inject dynamic variable (age_sex) if present in the template
+            formatted_templates = [t.replace("{age_sex}", age_sex).replace("{age}", age_sex) for t in templates]
+            queries.extend(formatted_templates[:2])
             found_template = True
             break
             
@@ -315,8 +153,7 @@ def generate_hypothesis_queries(patient_data: Dict, differentials: List[str]) ->
 
 async def process_er_audio_update(patient_id: int, transcript: str):
     """
-    Enhanced Clinical Agent with Scribe/Advisor separation and sequential processing
-    to prevent local LLM segfaults.
+    Enhanced Clinical Agent with Scribe/Advisor separation and sequential processing.
     """
     logger.info(f"Processing ER update for PID {patient_id}")
     ER_STATUS[patient_id] = "Processing transcript..."
@@ -325,7 +162,13 @@ async def process_er_audio_update(patient_id: int, transcript: str):
         settings = await get_all_settings()
         model = settings.get("llm_model", "phi4-mini")
         
-        # Load custom prompts if available
+        # Load configurable logic maps
+        try:
+            scenario_templates = json.loads(settings.get("clinical_scenario_templates", "{}"))
+        except:
+            scenario_templates = {}
+
+        # Load custom prompts
         scribe_prompt = settings.get("er_system_scribe", SCRIBE_SYSTEM_PROMPT)
         advisor_prompt = settings.get("er_system_attending", ADVISOR_SYSTEM_PROMPT)
         master_template = settings.get("er_master_chart_template", DEFAULT_CHART_TEMPLATE)
@@ -339,16 +182,14 @@ async def process_er_audio_update(patient_id: int, transcript: str):
         last_chart_row = await get_latest_er_chart(patient_id)
         current_chart = last_chart_row['chart_markdown'] if last_chart_row else master_template
         
-        # Get previous guidance
         previous_guidance = None
         if last_chart_row and last_chart_row.get('clinical_guidance_json'):
-            try:
-                previous_guidance = json.loads(last_chart_row['clinical_guidance_json'])
+            try: previous_guidance = json.loads(last_chart_row['clinical_guidance_json'])
             except: pass
             
         context = ClinicalContext(current_chart, previous_guidance)
 
-        # 2. STEP: SCRIBE (Update Documentation)
+        # 2. STEP: SCRIBE
         ER_STATUS[patient_id] = "Updating chart..."
         
         scribe_user_prompt = f"""Update the emergency department chart with the new dictation.
@@ -392,11 +233,9 @@ Return ONLY a JSON array of problem strings, e.g.:
         
         try:
             problems_json = await get_ai_response([{"role": "user", "content": problem_prompt}], model=model)
-            # Robust cleaning
             problems_json = problems_json.strip()
             if "```json" in problems_json: problems_json = problems_json.split("```json")[1].split("```")[0]
             elif "```" in problems_json: problems_json = problems_json.split("```")[1]
-            
             active_problems = json.loads(problems_json)
             if not isinstance(active_problems, list): active_problems = [patient['chief_complaint']]
         except:
@@ -408,14 +247,13 @@ Return ONLY a JSON array of problem strings, e.g.:
         if context.should_regenerate_guidance(transcript):
             ER_STATUS[patient_id] = "Consulting medical literature..."
             
-            queries = generate_hypothesis_queries(patient, active_problems)
+            # Pass dynamic templates to generator
+            queries = generate_hypothesis_queries(patient, active_problems, scenario_templates)
             research_findings = []
             
             sources = await get_medical_sources()
             approved_sites = [s['url_pattern'] for s in sources] if sources else []
             
-            # Execute Search for top problems
-            # Use Sanitized Name from Config to ensure match with Ingest
             med_collection = sanitize_collection_name(STEWARD_MEDICAL_FOLDER)
             
             for problem in active_problems[:2]:
@@ -442,7 +280,7 @@ Return ONLY a JSON array of problem strings, e.g.:
             
             research_context = "\n\n".join(research_findings)
 
-            # 5. CLINICAL ADVISOR (The Synthesis)
+            # 5. CLINICAL ADVISOR
             ER_STATUS[patient_id] = "Generating clinical guidance..."
             
             advisor_user_prompt = f"""You are supervising this Emergency Department case. Provide comprehensive clinical decision support.
@@ -484,7 +322,6 @@ Return ONLY the JSON object."""
             ], model=model)
             
             try:
-                # Robust JSON Parsing
                 clean_json = advisor_response.strip()
                 if '```json' in clean_json:
                     clean_json = clean_json.split('```json')[1].split('```')[0]
@@ -492,14 +329,11 @@ Return ONLY the JSON object."""
                     clean_json = clean_json.split('```')[1]
                 
                 clinical_guidance = json.loads(clean_json)
-                
-                # Metadata
                 clinical_guidance['metadata'] = clinical_guidance.get('metadata', {})
                 clinical_guidance['metadata']['last_updated'] = datetime.now().isoformat()
                 
             except Exception as e:
                 logger.error(f"Advisor JSON parse failed: {e}")
-                # FALLBACK: Minimal valid object to prevent UI breakage
                 clinical_guidance = {
                     "critical_alerts": [{"alert": "Review chart manually - AI analysis failed", "severity": "IMPORTANT", "action_required": "Review", "time_sensitive": False}],
                     "differential_diagnosis": [{"diagnosis": p, "probability": 50, "status": "POSSIBLE", "cant_miss": True, "supporting_evidence": [], "contradicting_evidence": []} for p in active_problems],
@@ -512,7 +346,6 @@ Return ONLY the JSON object."""
         # 6. SAVE
         ER_STATUS[patient_id] = "Finalizing..."
         
-        # Legacy fields for backward compatibility
         differentials = []
         if clinical_guidance and 'differential_diagnosis' in clinical_guidance:
             differentials = [d.get('diagnosis') for d in clinical_guidance['differential_diagnosis']]
@@ -538,7 +371,6 @@ Return ONLY the JSON object."""
 
         # 7. NOTIFY
         if clinical_guidance and clinical_guidance.get('critical_alerts'):
-            # Count criticals
             crits = [a for a in clinical_guidance['critical_alerts'] if a.get('severity') == 'CRITICAL']
             if crits:
                 alert_text = crits[0]['alert']

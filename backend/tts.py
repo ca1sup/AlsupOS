@@ -1,12 +1,12 @@
-
-# backend/tts.py
 import tempfile
 import os
 import logging
 import asyncio
 import soundfile as sf
+import numpy as np
 from pathlib import Path
-from backend.config import STT_MODEL_NAME, TTS_MODEL_NAME, TTS_VOICE
+from backend.database import get_all_settings
+from backend.config import STT_MODEL_NAME, TTS_MODEL_NAME, TTS_VOICE as DEFAULT_VOICE
 
 logger = logging.getLogger(__name__)
 
@@ -27,125 +27,108 @@ try:
 except ImportError:
     logger.warning("❌ mlx-audio not installed. TTS disabled. Run: pip install mlx-audio soundfile")
 
+# Valid voice mappings for Kokoro-82M-bf16
+KOKORO_VOICES = {
+    'a': {  # American English
+        'male': ['am_adam', 'am_michael'],
+        'female': ['af_heart', 'af_bella', 'af_nicole', 'af_sarah', 'af_sky']
+    },
+    'b': {  # British English
+        'male': ['bm_lewis'],
+        'female': ['bf_emma', 'bf_isabella']
+    }
+}
+
+def get_valid_voice(requested_voice: str, lang_code: str) -> str:
+    """Returns a valid voice, falling back to defaults if needed."""
+    all_voices = KOKORO_VOICES.get(lang_code, {})
+    valid_voices = all_voices.get('male', []) + all_voices.get('female', [])
+    
+    if requested_voice in valid_voices:
+        return requested_voice
+    
+    # Fallback logic
+    fallback = None
+    if requested_voice.startswith('am_') or requested_voice.startswith('bm_'):
+        fallback = all_voices.get('male', [None])[0]
+    else:
+        fallback = all_voices.get('female', [None])[0]
+    
+    if not fallback:
+        fallback = valid_voices[0] if valid_voices else 'af_heart'
+    
+    return fallback
+
 # --- MLX WHISPER WRAPPER (STT) ---
 class MLXWhisperWrapper:
     """
-    Wraps mlx_whisper to mimic the OpenAI Whisper API structure
-    expected by the rest of the application (model.transcribe).
+    Wraps mlx_whisper to mimic the OpenAI Whisper API structure.
     """
     def __init__(self, model_path: str):
         self.model_path = model_path
-        self._is_ready = True # MLX loads lazily/instantly
+        self._is_ready = True
 
     def transcribe(self, audio_path: str, **kwargs) -> dict:
         if not MLX_WHISPER_AVAILABLE:
             raise RuntimeError("mlx-whisper library is not available.")
         
-        # Extract initial_prompt if present
         prompt = kwargs.get('initial_prompt', "Voice dictation.")
         
-        # MLX Whisper transcribe function
         result = mlx_whisper.transcribe(
             audio_path, 
             path_or_hf_repo=self.model_path,
             initial_prompt=prompt,
             verbose=False
         )
-        
-        # --- HALLUCINATION FILTER ---
-        text = result.get('text', '').strip()
-        hallucinations = [
-            "Thank you.", "Thank you", "Thanks.", "Thanks", 
-            "Thank you for watching.", "You", "MBC News", 
-            "Subscribe", "Bye."
-        ]
-        
-        # Filter single char noise (e.g. ".")
-        if len(text) < 2 and text in ['.', '?', '!', ',']:
-             logger.info(f"🧹 Filtered punctuation: '{text}'")
-             result['text'] = ""
-             return result
-
-        if text in hallucinations or text.lower() in [h.lower() for h in hallucinations]:
-            logger.info(f"🧹 Filtered hallucination: '{text}'")
-            result['text'] = ""
-            
+        # Hallucination filter removed per user request
         return result
 
 # Singleton Storage for STT
 WHISPER_INSTANCE = None
 
 async def load_whisper_model():
-    """
-    Initializes the MLX Whisper wrapper.
-    """
     global WHISPER_INSTANCE
-    
-    if not MLX_WHISPER_AVAILABLE:
-        logger.error("❌ mlx-whisper not installed. STT disabled.")
-        return None
-
-    if WHISPER_INSTANCE:
-        return WHISPER_INSTANCE
+    if not MLX_WHISPER_AVAILABLE: return None
+    if WHISPER_INSTANCE: return WHISPER_INSTANCE
 
     logger.info(f"🎙️ Configuring MLX Whisper: {STT_MODEL_NAME}")
-    
     try:
         wrapper = MLXWhisperWrapper(STT_MODEL_NAME)
-        
         # WARMUP
-        logger.info("⏳ Warming up Whisper...")
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             header = b'RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00'
             tmp.write(header)
             tmp_path = tmp.name
-            
         try:
             await asyncio.to_thread(wrapper.transcribe, tmp_path)
-            logger.info("✅ MLX Whisper Ready.")
-        except Exception as e:
-            logger.warning(f"⚠️ Whisper Warmup failed (non-critical): {e}")
+        except Exception: pass
         finally:
             if os.path.exists(tmp_path): os.remove(tmp_path)
 
         WHISPER_INSTANCE = wrapper
         return wrapper
-
     except Exception as e:
         logger.error(f"❌ Failed to initialize MLX Whisper: {e}")
         return None
 
 async def get_whisper_model():
     global WHISPER_INSTANCE
-    if WHISPER_INSTANCE:
-        return WHISPER_INSTANCE
+    if WHISPER_INSTANCE: return WHISPER_INSTANCE
     return await load_whisper_model()
 
-
 # --- KOKORO TTS WRAPPER ---
-
-# Singleton Storage for TTS
 TTS_PIPELINE_INSTANCE = None
 
-async def get_tts_pipeline():
-    """
-    Lazy loads the Kokoro TTS pipeline.
-    """
+async def get_tts_pipeline(voice_code='a'):
     global TTS_PIPELINE_INSTANCE
-    if not MLX_TTS_AVAILABLE:
-        logger.error("❌ mlx-audio (Kokoro) not installed.")
-        return None
-
-    if TTS_PIPELINE_INSTANCE:
-        return TTS_PIPELINE_INSTANCE
+    if not MLX_TTS_AVAILABLE: return None
+    if TTS_PIPELINE_INSTANCE: return TTS_PIPELINE_INSTANCE
 
     logger.info(f"🗣️ Loading Kokoro TTS: {TTS_MODEL_NAME}")
     try:
         def _load():
             model = load_tts_model_raw(TTS_MODEL_NAME)
-            # lang_code 'a' = American English, 'b' = British English
-            lang = 'a' if 'af_' in TTS_VOICE or 'am_' in TTS_VOICE else 'b'
-            return KokoroPipeline(lang_code=lang, model=model, repo_id=TTS_MODEL_NAME)
+            return KokoroPipeline(lang_code=voice_code, model=model, repo_id=TTS_MODEL_NAME)
 
         TTS_PIPELINE_INSTANCE = await asyncio.to_thread(_load)
         logger.info("✅ Kokoro TTS Loaded.")
@@ -157,29 +140,103 @@ async def get_tts_pipeline():
 async def generate_audio_briefing(text: str) -> str:
     """
     Generates an audio file from the text using local Kokoro TTS (MLX).
-    Returns the path to the temporary file.
+    Consumes the generator to handle streaming output correctly.
     """
-    pipeline = await get_tts_pipeline()
+    settings = await get_all_settings()
+    requested_voice = settings.get("tts_voice", DEFAULT_VOICE)
     
-    if not pipeline:
-        logger.warning("TTS Pipeline unavailable. Audio briefing generation skipped.")
+    # Determine lang code & validate voice
+    lang_code = 'b' if requested_voice.startswith(('bf_', 'bm_')) else 'a'
+    voice = get_valid_voice(requested_voice, lang_code)
+    
+    pipeline = await get_tts_pipeline(lang_code)
+    if not pipeline: 
+        logger.error("TTS pipeline not available")
         return ""
 
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+
     try:
-        fd, path = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)
-        
-        logger.info(f"Generating TTS for {len(text)} chars...")
+        logger.info(f"Generating TTS for {len(text)} chars using voice '{voice}'...")
 
         def _synthesize():
-            # Kokoro generation
-            audio_data, sample_rate = pipeline(text, voice=TTS_VOICE, speed=1.0)
-            sf.write(path, audio_data, sample_rate)
-        
+            try:
+                # 1. Call Pipeline
+                logger.info("🔵 Calling pipeline...")
+                result = pipeline(text, voice=voice, speed=1.0)
+                
+                # 2. Consume Result (Generator vs Object)
+                sample_rate = 24000
+                audio_parts = []
+                
+                # Check for Generator (Streaming Mode)
+                if hasattr(result, '__next__') or (hasattr(result, '__iter__') and not isinstance(result, (tuple, list, np.ndarray))):
+                    logger.info("🟡 Result is a generator - consuming chunks...")
+                    for chunk in result:
+                        # Inspect Chunk
+                        part = chunk
+                        if isinstance(chunk, tuple):
+                            if len(chunk) > 0: part = chunk[0]
+                            if len(chunk) >= 2 and isinstance(chunk[1], int): sample_rate = chunk[1]
+                        
+                        # Convert Chunk to NumPy immediately
+                        if hasattr(part, 'numpy'): part = part.numpy()
+                        elif not isinstance(part, np.ndarray): part = np.array(part)
+                        
+                        audio_parts.append(part)
+                    logger.info(f"🟡 Collected {len(audio_parts)} chunks")
+                
+                # Check for Tuple (Single Result)
+                elif isinstance(result, tuple):
+                    logger.info("🟡 Result is a tuple")
+                    if len(result) > 0:
+                        part = result[0]
+                        if len(result) >= 2 and isinstance(result[1], int): sample_rate = result[1]
+                        
+                        if hasattr(part, 'numpy'): part = part.numpy()
+                        elif not isinstance(part, np.ndarray): part = np.array(part)
+                        audio_parts.append(part)
+                
+                # Direct Object (Single Result)
+                else:
+                    logger.info("🟡 Result is a direct object")
+                    part = result
+                    if hasattr(part, 'numpy'): part = part.numpy()
+                    elif not isinstance(part, np.ndarray): part = np.array(part)
+                    audio_parts.append(part)
+
+                # 3. Concatenate
+                if not audio_parts:
+                    raise ValueError("No audio data produced by pipeline")
+                
+                if len(audio_parts) == 1:
+                    audio_data = audio_parts[0]
+                else:
+                    audio_data = np.concatenate(audio_parts)
+                
+                # 4. Final Validation & Squeeze
+                # Flattens (N, 1) or (1, N) to (N,) for soundfile
+                audio_data = np.squeeze(audio_data)
+                
+                if audio_data.size == 0:
+                    raise ValueError("Final audio data is empty")
+                
+                # 5. Write
+                logger.info(f"🟣 Writing to {path}: shape={audio_data.shape}, sr={sample_rate}")
+                sf.write(path, audio_data, sample_rate)
+                logger.info(f"✅ Successfully wrote audio file")
+
+            except Exception as e:
+                logger.error(f"❌ Synthesis logic failed: {e}", exc_info=True)
+                raise e
+
         await asyncio.to_thread(_synthesize)
-        
-        logger.info(f"Generated TTS audio at {path}")
         return path
+
     except Exception as e:
-        logger.error(f"TTS Generation Failed: {e}")
+        logger.error(f"❌ TTS Generation Failed: {e}", exc_info=True)
+        if os.path.exists(path):
+            try: os.remove(path)
+            except: pass
         return ""

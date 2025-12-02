@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Save, Loader2, MapPin, User } from 'lucide-react';
+import { Save, Loader2, MapPin, User, Mic } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { useAppStore } from '../../../store/useAppStore';
 
@@ -9,7 +9,6 @@ const SettingsGeneral: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  // Load from Store on mount
   useEffect(() => {
     const init = async () => {
         await fetchInitialData();
@@ -18,7 +17,6 @@ const SettingsGeneral: React.FC = () => {
     init();
   }, [fetchInitialData]);
 
-  // Sync local state with global store when it changes
   useEffect(() => {
     if (settings) {
         setLocalSettings(settings);
@@ -122,6 +120,27 @@ const SettingsGeneral: React.FC = () => {
                         placeholder="e.g. New York, NY"
                     />
                 </div>
+            </div>
+        </div>
+
+        {/* Voice Section */}
+        <div className="p-8 bg-surface border border-border-invisible hover:border-border-subtle rounded-[24px] transition-colors">
+            <div className="flex items-center gap-4 mb-8">
+                <div className="p-3 bg-elevated rounded-xl text-accent">
+                    <Mic className="w-6 h-6" />
+                </div>
+                <h3 className="text-xl font-medium text-txt-primary">Voice Settings</h3>
+            </div>
+            <div>
+                <label className="block text-[11px] font-bold text-txt-tertiary uppercase tracking-widest mb-3">TTS Voice (Kokoro)</label>
+                <input 
+                    type="text" 
+                    value={localSettings.tts_voice || 'af_heart'}
+                    onChange={e => handleChange('tts_voice', e.target.value)}
+                    className="w-full bg-input border border-border-subtle rounded-xl px-5 py-4 text-txt-primary focus:outline-none focus:border-accent transition-colors font-mono"
+                    placeholder="af_heart"
+                />
+                <p className="text-xs text-txt-tertiary mt-2">Options: af_heart, af_bella, am_adam, bf_emma, etc.</p>
             </div>
         </div>
 
