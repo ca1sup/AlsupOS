@@ -77,15 +77,22 @@ async def run_daily_summary():
             completed=completed_str,
             recent_journals=journal_context,
             health_summary=health_str,
-            family_context=facts_str, # Fix: Added this key
+            family_context=facts_str, 
             
+            # FIX: Added 'all_context' to resolve previous KeyError
+            all_context=f"Events: {todays_events_str}\nTasks: {tasks_str}\nHealth: {health_str}\nFacts: {facts_str}",
+
             # Fill placeholders if they exist in the template but not calculated here
             finance_summary="Finance sync pending",
             workout_plan="Workout pending",
             worship_plan="Worship pending",
             homeschool_plan="Homeschool pending",
             clinical_pearl="No pearl today",
-            months_events=""
+            months_events="",
+            
+            # FIX: Added missing keys for robustness (risk_analysis_output error)
+            risk_analysis_output="No specific risk analysis generated.",
+            project_updates="No active project updates."
         )
 
         # 3. Generate

@@ -1,4 +1,3 @@
-
 import os
 import sys
 import time
@@ -113,27 +112,63 @@ class WorkerModel:
 
 # --- INITIALIZATION ---
 
+def get_setting(key: str) -> Optional[str]:
+    return _settings.get(key)
+
 async def init_llm():
     global g_llm_model, g_llm_tokenizer
+    # If a model is already loaded, do nothing (prevents accidental reloads)
     if g_llm_model is not None: return
     if not HAS_MLX: return
 
-    SAFE_MODEL_REF = DEFAULT_MLX_MODEL
-    local_model_path = MODELS_DIR / SAFE_MODEL_REF
-    model_ref = str(local_model_path) if local_model_path.exists() else SAFE_MODEL_REF
+    # 1. Determine which model to load
+    #    Priority: Setting > Config Default
+    target_model_name = get_setting("llm_model")
+    if not target_model_name:
+        target_model_name = DEFAULT_MLX_MODEL
     
-    logger.info(f"🚀 Initializing MLX Model: {model_ref}")
+    # 2. Resolve Path
+    #    Check if it exists locally in MODELS_DIR, otherwise treat as HF Repo ID
+    local_model_path = MODELS_DIR / target_model_name
+    
+    if local_model_path.exists():
+        model_ref = str(local_model_path)
+        logger.info(f"📂 Loading Local Model from: {model_ref}")
+    else:
+        model_ref = target_model_name
+        logger.info(f"☁️ Loading Remote/Cache Model: {model_ref}")
     
     async with g_llm_lock:
         if g_llm_model is None:
             try:
-                model, tokenizer = await asyncio.to_thread(load, model_ref, tokenizer_config={"trust_remote_code": True})
+                # 3. Load Model
+                model, tokenizer = await asyncio.to_thread(
+                    load, 
+                    model_ref, 
+                    tokenizer_config={"trust_remote_code": True}
+                )
                 g_llm_model = model
                 g_llm_tokenizer = tokenizer
-                logger.info("✅ MLX Model Loaded successfully. Server is READY.")
+                logger.info(f"✅ MLX Model '{target_model_name}' Loaded Successfully.")
             except Exception as e:
-                logger.error(f"❌ Failed to load MLX model: {e}")
-                raise e
+                logger.error(f"❌ Failed to load MLX model '{target_model_name}': {e}")
+                # Don't raise, just log, so server stays alive (chat will fail gracefully)
+
+async def reload_llm():
+    """Unloads the current LLM and initializes the new one based on settings."""
+    global g_llm_model, g_llm_tokenizer
+    
+    logger.info("♻️  Reloading LLM...")
+    async with g_llm_lock:
+        # Force unload
+        g_llm_model = None
+        g_llm_tokenizer = None
+        # Optional: Trigger garbage collection if memory is tight
+        import gc
+        gc.collect()
+        
+    # Re-initialize (this will pick up the new setting)
+    await init_llm()
 
 async def get_embedding_model():
     global g_embed_model
@@ -205,9 +240,6 @@ async def get_cached_collection(name: str, force_reload: bool = False) -> Option
 async def load_settings():
     global _settings
     _settings = await get_all_settings()
-
-def get_setting(key: str) -> Optional[str]:
-    return _settings.get(key)
 
 async def get_reranker():
     global g_reranker

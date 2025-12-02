@@ -93,7 +93,7 @@ from backend.rag import (
     search_file, generate_stream, generate_bare_stream,
     get_document_content,
     get_whoosh_index, perform_rag_query,
-    init_llm,
+    init_llm, reload_llm, 
     check_ollama_status
 )
 from backend.rag import load_settings as load_rag_settings
@@ -146,6 +146,8 @@ async def lifespan(app: FastAPI):
     # 1. STARTUP
     logger.info("⚡ Steward Backend Starting...")
     await init_db()
+    
+    # Load settings into memory before init_llm so we know which model to pick
     await load_rag_settings()
     
     # Init MLX LLM (Chat Model)
@@ -523,8 +525,24 @@ async def api_er_update_audio(pid: int, file: UploadFile = File(...)):
 class Settings(BaseModel): settings: dict
 @app.get("/api/settings")
 async def api_get_settings(): return {"settings": await get_all_settings()}
+
 @app.post("/api/settings")
-async def api_update_settings(p: Settings): await update_settings(p.settings); await load_rag_settings(); return {"status": "success"}
+async def api_update_settings(p: Settings):
+    # Detect Model Switch
+    current = await get_all_settings()
+    old_model = current.get("llm_model")
+    
+    await update_settings(p.settings)
+    await load_rag_settings()
+    
+    new_model = p.settings.get("llm_model")
+    
+    # If the model changed, trigger a background reload so we don't block the UI response
+    if new_model and new_model != old_model:
+        logger.info(f"🔄 Model switch detected: {old_model} -> {new_model}. Triggering reload.")
+        asyncio.create_task(reload_llm())
+        
+    return {"status": "success"}
 
 @app.get("/api/memory/facts")
 async def api_get_facts(): return {"facts": await get_all_user_facts_structured()}
