@@ -2,15 +2,26 @@
 import { StateCreator } from 'zustand';
 import { StoreState, SettingsSlice, HealthMetric } from '../types';
 
-// Mock API helper
+// Extended API helper
 const api = {
     getSettings: async () => (await fetch('/api/settings')).json(),
     updateSettings: async (s: any) => fetch('/api/settings', { method: 'POST', body: JSON.stringify({settings: s}), headers: {'Content-Type':'application/json'} }),
+    
+    // Jobs
     runJob: () => fetch('/api/steward/run_job', { method: 'POST' }),
     runFinance: () => fetch('/api/steward/run_finance_sync', { method: 'POST' }),
     runMed: () => fetch('/api/steward/run_med_news_sync', { method: 'POST' }),
-    fetchModels: async () => (await fetch('/api/ollama/models')).json(),
-    deleteModel: (n: string) => fetch(`/api/ollama/model/${n}`, { method: 'DELETE' }),
+    
+    // Model Management
+    fetchModels: async () => (await fetch('/api/models')).json(),
+    deleteModel: (id: string) => fetch(`/api/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    pullModel: (repo_id: string) => fetch('/api/models/pull', { 
+        method: 'POST', 
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ repo_id }) 
+    }),
+
+    // Data
     importBackup: (f: File) => { const d = new FormData(); d.append('file', f); return fetch('/api/backup/import', { method: 'POST', body: d }); },
     updateTask: (id: number, s: string) => fetch(`/api/steward/task/${id}`, { method: 'POST', body: JSON.stringify({status: s}), headers: {'Content-Type':'application/json'} }),
     fetchDashboard: async () => (await fetch('/api/steward/dashboard')).json(),
@@ -65,12 +76,17 @@ export const createSettingsSlice: StateCreator<StoreState, [], [], SettingsSlice
 
     deleteModel: async (n: string) => {
         await api.deleteModel(n);
-        get().fetchModels();
+        // Delay fetch slightly to allow file system to catch up
+        setTimeout(() => get().fetchModels(), 1000);
     },
 
     setActiveModel: async (n: string) => {
         const s = { ...get().settings, llm_model: n };
         await get().updateSettings(s);
+    },
+    
+    pullModel: async (repoId: string) => {
+        await api.pullModel(repoId);
     },
 
     fetchDashboard: async () => {

@@ -19,6 +19,7 @@ import shutil
 import logging
 from contextlib import asynccontextmanager
 from multiprocessing import Process, Queue
+from urllib.parse import unquote # Added for safe model deletion
 
 # Internal Imports
 from backend.immich import search_immich_photos 
@@ -151,7 +152,6 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(init_llm())
 
     # Pre-load MLX Whisper Model
-    # This prevents blocking the main thread during heavy model loads
     asyncio.create_task(load_whisper_model())
 
     # Start Scheduler
@@ -280,25 +280,131 @@ async def api_health_check():
     except: pass
     return {"status": "ok", "db_status": db_ok, "mlx_status": "loading" if not await check_ollama_status() else "ready"}
 
-# === MODEL ENDPOINTS (For Settings) ===
-@app.get("/api/ollama/models")
+# === MODEL MANAGER ENDPOINTS ===
+
+def get_folder_size(path: Path) -> str:
+    """Returns directory size in readable format."""
+    total = 0
+    try:
+        for entry in path.rglob('*'):
+            if entry.is_file():
+                total += entry.stat().st_size
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if total < 1024.0:
+                return f"{total:.2f} {unit}"
+            total /= 1024.0
+    except: pass
+    return "Unknown"
+
+@app.get("/api/models")
 async def api_get_models():
-    """
-    Mock Ollama endpoint to satisfy frontend settings page.
-    Returns the locally configured MLX model and any others found in models/.
-    """
-    models = [{"name": DEFAULT_MLX_MODEL, "details": {"family": "mlx"}}]
+    """Returns list of downloaded models in MODELS_DIR."""
+    models = []
     
-    # Scan models directory for other downloaded models
+    # 1. Scan Local Models Directory
+    # Look deeper than just top level to find actual models
     if MODELS_DIR.exists():
-        for p in MODELS_DIR.iterdir():
-            # Don't duplicate the default if it's already there
-            if p.is_dir() and p.name != DEFAULT_MLX_MODEL:
-                models.append({"name": p.name, "details": {"family": "local"}})
-                
+        # First, check immediate subdirectories (standard structure)
+        candidates = [p for p in MODELS_DIR.iterdir() if p.is_dir() and not p.name.startswith('.')]
+        
+        # Second, checking for deeper nested hugginface structures
+        # e.g. models/mlx-community/Phi-3...
+        for p in candidates:
+            # Check if this folder itself is a model (has config.json)
+            if (p / "config.json").exists():
+                models.append({
+                    "name": p.name,
+                    "size": get_folder_size(p),
+                    "path": str(p),
+                    "source": "Local (MLX)"
+                })
+            else:
+                # Check one level deeper for namespaced models
+                for sub in p.iterdir():
+                    if sub.is_dir() and (sub / "config.json").exists():
+                        # Use relative path as name for clarity: "mlx-community/Phi-3"
+                        rel_name = f"{p.name}/{sub.name}"
+                        models.append({
+                            "name": rel_name,
+                            "size": get_folder_size(sub),
+                            "path": str(sub),
+                            "source": "Local (MLX)"
+                        })
+
+    # 2. Add Default if missing (Virtual entry)
+    # Only add if we haven't found it locally yet
+    if not any(m['name'] == DEFAULT_MLX_MODEL for m in models):
+        models.append({
+            "name": DEFAULT_MLX_MODEL,
+            "size": "Not Downloaded",
+            "path": "",
+            "source": "Remote (Hugging Face)"
+        })
+        
     return {"models": models}
 
-# === FILE SYSTEM ENDPOINTS (FIXED) ===
+class PullModelPayload(BaseModel):
+    repo_id: str
+
+def _download_model_task(repo_id: str):
+    """Background task to download model using huggingface_hub."""
+    try:
+        logger.info(f"📥 Starting download for {repo_id}...")
+        from huggingface_hub import snapshot_download
+        
+        # Download to specific folder in MODELS_DIR
+        # Use full path to avoid flat structure collisions
+        target_dir = MODELS_DIR / repo_id
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=str(target_dir),
+            local_dir_use_symlinks=False
+        )
+        logger.info(f"✅ Download complete: {repo_id}")
+    except Exception as e:
+        logger.error(f"❌ Failed to download {repo_id}: {e}")
+
+@app.post("/api/models/pull")
+async def api_pull_model(payload: PullModelPayload, background_tasks: BackgroundTasks):
+    """Triggers background download of a Hugging Face model."""
+    background_tasks.add_task(_download_model_task, payload.repo_id)
+    return {"status": "started", "message": f"Downloading {payload.repo_id} in background..."}
+
+@app.delete("/api/models/{model_id:path}")
+async def api_delete_model(model_id: str):
+    """Deletes a model directory."""
+    try:
+        # Decode the URL-encoded path (e.g., "mlx-community%2FPhi-3" -> "mlx-community/Phi-3")
+        decoded_id = unquote(model_id)
+        
+        # Construct path safely
+        target_path = (MODELS_DIR / decoded_id).resolve()
+        
+        # Security check: ensure we are only deleting inside MODELS_DIR
+        if not str(target_path).startswith(str(MODELS_DIR.resolve())):
+            logger.warning(f"Delete blocked: {target_path} is outside {MODELS_DIR}")
+            raise HTTPException(status_code=403, detail="Access denied")
+            
+        if target_path.exists() and target_path.is_dir():
+            shutil.rmtree(target_path)
+            
+            # Clean up parent if empty (e.g. if we deleted the last model in 'mlx-community')
+            parent = target_path.parent
+            if parent != MODELS_DIR and not any(parent.iterdir()):
+                try: parent.rmdir()
+                except: pass
+                
+            return {"status": "success", "message": f"Deleted {decoded_id}"}
+        else:
+            logger.warning(f"Model delete 404: {target_path} does not exist.")
+            raise HTTPException(status_code=404, detail="Model not found")
+    except Exception as e:
+        logger.error(f"Delete failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# === FILE SYSTEM ENDPOINTS ===
 @app.get("/api/folders")
 async def api_get_folders():
     return {"folders": await get_folders()}
@@ -308,14 +414,13 @@ async def api_get_files(folder: str):
     files = await get_files_in_folder(folder)
     return {"files": files}
 
-# === CHAT SESSION ENDPOINTS (FIXED) ===
+# === CHAT SESSION ENDPOINTS ===
 @app.get("/api/chat/sessions")
 async def api_get_sessions():
     return {"sessions": await get_sessions()}
 
 @app.post("/api/chat/session")
 async def api_create_session():
-    # Create new session with default name
     session = await create_session("New Session")
     return {"session": session}
 
@@ -332,27 +437,21 @@ async def api_rename_session(session_id: int, payload: RenameSessionPayload):
 
 @app.get("/api/chat/history/{session_id}")
 async def api_get_chat_history(session_id: int):
-    # Retrieve full history including metadata/sources
     history = await get_chat_history(session_id, lightweight=False)
     return {"messages": history}
 
-# === DASHBOARD ENDPOINTS (FIXED) ===
+# === DASHBOARD ENDPOINTS ===
 @app.get("/api/steward/dashboard")
 async def api_steward_dashboard_data():
     return {
         "suggestions": await get_latest_suggestion(),
         "tasks": await get_pending_tasks(),
         "events": await get_weeks_events_structured(),
-        # Finance mock if real sync is not configured
-        "finance": { 
-            "summary": "Finance sync pending", 
-            "budget_used": "0%" 
-        } 
+        "finance": { "summary": "Finance sync pending", "budget_used": "0%" } 
     }
 
 @app.get("/api/steward/dashboard/health")
 async def api_steward_dashboard_health():
-    # Returns latest 7 days for the sparklines
     return {"health_metrics": await get_recent_health_metrics_structured(7)}
 
 class TaskStatusPayload(BaseModel): status: str
@@ -400,7 +499,6 @@ async def api_er_status(pid: int):
 
 @app.post("/api/er/update_audio/{pid}")
 async def api_er_update_audio(pid: int, file: UploadFile = File(...)):
-    # Lazy load or check status
     model = await get_whisper_model()
     if not model: 
         raise HTTPException(status_code=503, detail="Whisper unavailable (Loading or Missing).")
@@ -411,9 +509,6 @@ async def api_er_update_audio(pid: int, file: UploadFile = File(...)):
             while chunk := await file.read(UPLOAD_CHUNK_SIZE): await f.write(chunk)
             
         def _transcribe():
-            # USES MEDICAL PROMPT FOR ACCURACY
-            # Note: mlx_whisper wrapper will strip kwargs it doesn't support if strict, 
-            # but our wrapper supports 'initial_prompt'
             return model.transcribe(str(temp_path), initial_prompt=MEDICAL_SPEECH_PROMPT)
             
         res = await asyncio.to_thread(_transcribe)
@@ -459,8 +554,6 @@ class NotePayload(BaseModel):
 
 @app.post("/api/steward/transcribe_temp")
 async def api_transcribe_temp(file: UploadFile = File(...)):
-    """Transcribes audio without saving it, for user review."""
-    # Lazy load if needed
     model = await get_whisper_model()
     if not model: 
         raise HTTPException(status_code=503, detail="Whisper unavailable (Loading or Missing).")
@@ -481,11 +574,8 @@ async def api_transcribe_temp(file: UploadFile = File(...)):
 
 @app.post("/api/steward/save_note")
 async def api_save_note(p: NotePayload):
-    """Saves text to a specific folder based on category."""
     settings = await get_all_settings()
     
-    # Map Category to Folder Key
-    # Defaults to Journal if unknown
     folder_key_map = {
         "Nutrition": "steward_nutrition_folder",
         "Workout": "steward_workout_folder",
@@ -494,7 +584,6 @@ async def api_save_note(p: NotePayload):
         "Inbox": "steward_ingest_folder"
     }
     
-    # Default folder names if not in settings
     default_folders = {
         "Nutrition": STEWARD_NUTRITION_FOLDER,
         "Workout": STEWARD_WORKOUT_FOLDER,
@@ -506,51 +595,39 @@ async def api_save_note(p: NotePayload):
     folder_key = folder_key_map.get(p.category, "steward_journal_folder")
     folder_name = settings.get(folder_key, default_folders.get(p.category, STEWARD_JOURNAL_FOLDER))
     
-    # Construct Path
     path = DOCS_PATH / folder_name
     path.mkdir(parents=True, exist_ok=True)
     
-    # File naming: 2024-01-01.md for logs, or specific files for others
     filename = f"{datetime.now().strftime('%Y-%m-%d')}.md"
     if p.category == "Reminder": filename = "reminders.txt"
     if p.category == "Inbox": filename = f"note_{datetime.now().strftime('%H%M%S')}.md"
     
     file_path = path / filename
-    
     timestamp = datetime.now().strftime('%H:%M:%S')
     
-    # Append Mode
     async with aiofiles.open(file_path, "a", encoding="utf-8") as f:
         if p.category == "Reminder":
             await f.write(f"\n[ ] {p.content.strip()}")
-            # Also sync to Apple Reminders if applicable
-            try:
-                await asyncio.to_thread(add_reminder_to_app, p.content.strip(), "Inbox")
+            try: await asyncio.to_thread(add_reminder_to_app, p.content.strip(), "Inbox")
             except: pass
         else:
             await f.write(f"\n\n### {p.category} Entry @ {timestamp}\n{p.content.strip()}\n")
             
-    # Trigger ingest to update indexes
     await trigger_ingest_logic()
-    
     return {"status": "success"}
 
 class TaskPayload(BaseModel): task: str
 class JournalPayload(BaseModel): content: str
 @app.post("/api/steward/add_task")
 async def api_add_steward_task(payload: TaskPayload):
-    # Kept for backward compatibility with API helpers
     return await api_save_note(NotePayload(category="Reminder", content=payload.task))
 
 @app.post("/api/steward/add_journal")
 async def api_add_steward_journal(payload: JournalPayload):
-    # Kept for backward compatibility
     return await api_save_note(NotePayload(category="Journal", content=payload.content))
 
 @app.post("/api/upload/{folder}")
 async def api_upload(folder: str, files: list[UploadFile] = File(...)):
-    """Handles multiple file uploads from the chat input."""
-    # Ensure the target folder exists
     ingest_folder = folder if folder != "all" else (await get_all_settings()).get("steward_ingest_folder", STEWARD_INGEST_FOLDER)
     path = DOCS_PATH / ingest_folder
     path.mkdir(parents=True, exist_ok=True)
@@ -570,7 +647,6 @@ async def api_preview(folder: str, filename: str):
 
 @app.post("/api/ingest")
 async def trigger_ingest(): 
-    # Kept for backward compatibility, now aliases to api_trigger_ingest
     return await api_trigger_ingest()
 
 class ClipPayload(BaseModel): url: str
@@ -583,7 +659,7 @@ async def api_clip_webpage(payload: ClipPayload):
         safe = re.sub(r'[^a-zA-Z0-9_-]', '_', payload.url.split("://")[-1])[:100]
         async with aiofiles.open(path / f"clip_{safe}.md", "w", encoding="utf-8") as f:
             await f.write(f"# Clip from: {payload.url}\n\n> {payload.content}\n")
-        await trigger_ingest_logic() # Trigger Ingest
+        await trigger_ingest_logic()
         return {"status": "success"}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
@@ -626,13 +702,12 @@ async def api_voice_command(cmd: VoiceCommand):
     path = DOCS_PATH / folder / "voice_inbox.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     async with aiofiles.open(path, "a", encoding="utf-8") as f: await f.write(f"{cmd.text.strip()}\n")
-    await trigger_ingest_logic() # Trigger Ingest
+    await trigger_ingest_logic()
     return {"status": "success", "message": "Command received"}
 
 @app.websocket("/ws/audio")
 async def ws_audio(ws: WebSocket):
     await ws.accept()
-    # Lazy load for WebSocket too
     model = await get_whisper_model()
     if not model: await ws.close(code=1011, reason="Whisper unavailable"); return
     
@@ -644,10 +719,8 @@ async def ws_audio(ws: WebSocket):
                 if not data: break
                 await f.write(data)
                 await f.flush()
-                
                 def _transcribe():
                     return model.transcribe(str(temp_audio_path), initial_prompt=MEDICAL_SPEECH_PROMPT)
-                
                 result = await asyncio.to_thread(_transcribe)
                 text = result.get("text", "").strip()
                 if text: await ws.send_text(text)
@@ -667,37 +740,24 @@ async def ws_rag(ws: WebSocket):
             filename = data.get("file")
             query = data.get("query")
             persona = data.get("persona", "Vault")
-            lower_q = query.lower()
             
-            # Persist user message
             await add_chat_message(sid, "user", query, persona="User")
-
-            # --- FETCH HISTORY ---
-            # Retrieve recent conversation context for continuity
             history_objs = await get_chat_history(sid, lightweight=True)
-            # Format for LLM: [{"role": "user", "content": "..."}, ...]
-            # Take last 10 messages for context
             chat_history = [{"role": h['role'], "content": h['content']} for h in history_objs[-10:]]
 
-            # === 1. STEWARD AGENT (Full Tools) ===
             AGENT_PERSONAS = {"Steward", "Clinical", "CFO", "Coach", "Mentor", "Vault"}
             
             if persona in AGENT_PERSONAS:
                 full_resp = ""
                 collected_sources = []
-                
-                # Check for dict tokens (Sources) vs string tokens (Text)
-                # Now passing chat_history to the agent!
                 async for token in agent_stream(query, sid, persona, folder, filename, history=chat_history): 
                     if isinstance(token, dict) and token.get("type") == "sources":
-                         # Forward the structured source data to the frontend
                          await ws.send_json(token)
                          collected_sources = token.get("data", [])
                     else:
                          await ws.send_json({"type": "token", "data": token})
                          full_resp += token
                 
-                # Persistence: Append hidden JSON source block to the message
                 if collected_sources:
                      try:
                          src_str = json.dumps(collected_sources)
@@ -708,7 +768,6 @@ async def ws_rag(ws: WebSocket):
                 await ws.send_json({"type": "done"})
                 continue
 
-            # === 2. CHAT (Bare LLM) ===
             if persona == "Chat":
                 full_resp = ""
                 async for token in generate_bare_stream(query, chat_history, persona_name="Chat"):
