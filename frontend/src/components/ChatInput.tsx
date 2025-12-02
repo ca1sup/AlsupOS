@@ -11,11 +11,12 @@ const ChatInput: React.FC = () => {
   const [input, setInput] = useState('');
   const [showRecorder, setShowRecorder] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   const { 
     sendMessage, currentSessionId, createSession, 
     selectedFolder, selectedFile, isLoading, stopGeneration,
-    activePersona, setPersona 
+    activePersona, setPersona, uploadFiles 
   } = useAppStore();
 
   const handleSend = async () => {
@@ -46,6 +47,18 @@ const ChatInput: React.FC = () => {
       setInput(e.target.value);
       e.target.style.height = 'auto';
       e.target.style.height = `${e.target.scrollHeight}px`;
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files && e.target.files.length > 0) {
+          uploadFiles(e.target.files);
+          // Auto-select folder to Inbox to see the new file immediately
+          // Or we rely on the file list refreshing automatically via store
+      }
+  };
+
+  const triggerFileSelect = () => {
+      fileInputRef.current?.click();
   };
 
   return (
@@ -92,7 +105,16 @@ const ChatInput: React.FC = () => {
           disabled={isLoading}
         />
 
+        <input 
+            type="file" 
+            ref={fileInputRef} 
+            onChange={handleFileSelect} 
+            className="hidden" 
+            multiple 
+        />
+
         <button 
+            onClick={triggerFileSelect}
             className="p-3 text-txt-tertiary hover:text-white hover:bg-white/5 rounded-xl transition-all active:scale-95"
             title="Attach File"
         >
@@ -126,10 +148,7 @@ const ChatInput: React.FC = () => {
       {showRecorder && (
           <VoiceRecorderModal 
             onClose={() => setShowRecorder(false)} 
-            // FIXED: Renamed blob to _blob to silence unused variable error
-            onUpload={async (_blob) => {
-                setShowRecorder(false);
-            }}
+            onUpload={async () => { setShowRecorder(false); }}
           />
       )}
     </div>

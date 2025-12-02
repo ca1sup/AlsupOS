@@ -25,6 +25,7 @@ from backend.config import (
 )
 from backend.rag import get_ai_response, search_file
 from backend.notifications import send_email
+from backend.tts import get_whisper_model # <--- Centralized Loader
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -98,74 +99,43 @@ async def ingest_calendar_file(file_path: Path, conn: aiosqlite.Connection):
         await conn.commit()
     except Exception: pass
 
-# --- VOICE MEMO PROCESSORS ---
-async def process_journal_memo(file_path: Path, conn: aiosqlite.Connection, settings: Dict[str, Any]):
+# --- MEDIA HANDLERS ---
+
+async def transcribe_audio_file(file_path: Path):
+    """Transcribes an audio file using the centralized Whisper model."""
+    model = await get_whisper_model()
+    if not model:
+        print("  [MAGIC] ❌ Whisper model unavailable.")
+        return None
+
     try:
-        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f: transcript = await f.read()
-        folder = settings.get("steward_journal_folder", STEWARD_JOURNAL_FOLDER)
-        target_path = DOCS_PATH / folder / datetime.now().strftime('%Y-%m-%d.md')
-        target_path.parent.mkdir(exist_ok=True, parents=True)
-        async with aiofiles.open(target_path, "a", encoding="utf-8") as f:
-            await f.write(f"\n\n### Voice Journal @ {datetime.now().strftime('%H:%M:%S')}\n{transcript.strip()}\n")
-        await asyncio.to_thread(os.remove, file_path)
-    except Exception: pass
+        def _transcribe():
+            # The wrapper we built in tts.py now handles the model path automatically
+            return model.transcribe(str(file_path))
+        
+        res = await asyncio.to_thread(_transcribe)
+        return res.get("text", "").strip()
+    except Exception as e:
+        print(f"Transcription failed for {file_path}: {e}")
+        return None
 
-async def process_workout_memo(file_path: Path, conn: aiosqlite.Connection, ollama: Any, settings: Dict[str, Any]):
+async def extract_pdf_text(file_path: Path) -> str:
+    """Extracts text from PDF using pypdf if available, else simplistic extraction."""
     try:
-        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f: transcript = await f.read()
-        prompt = "Extract workout data as JSON list. Keys: exercise, sets, reps, weight, rpe."
-        resp = await get_ai_response([{"role": "system", "content": prompt}, {"role": "user", "content": transcript}], model=settings.get("llm_model"))
-        data = await _extract_json_from_llm(resp)
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    await conn.execute("INSERT INTO workout_log (exercise, sets, reps, weight, rpe, source_tag, source_file) VALUES (?,?,?,?,?,?,?)",
-                        (item.get("exercise"), item.get("sets"), str(item.get("reps")), item.get("weight"), item.get("rpe"), "WORKOUT", file_path.name))
-            await conn.commit()
-            await asyncio.to_thread(os.remove, file_path)
-    except Exception: pass
-
-async def process_nutrition_memo(file_path: Path, conn: aiosqlite.Connection, ollama: Any, settings: Dict[str, Any]):
-    try:
-        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f: transcript = await f.read()
-        prompt = "Estimate calories/macros. JSON keys: calories, protein, carbs, fat."
-        resp = await get_ai_response([{"role": "system", "content": prompt}, {"role": "user", "content": transcript}], model=settings.get("llm_model"))
-        data = await _extract_json_from_llm(resp)
-        if isinstance(data, dict):
-            await _upsert_nutrition(conn, data)
-            await asyncio.to_thread(os.remove, file_path)
-    except Exception: pass
-
-async def process_meal_plan_memo(file_path: Path, conn: aiosqlite.Connection, ollama: Any, settings: Dict[str, Any]):
-    try:
-        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f: pantry = await f.read()
-        if not settings.get("recipient_email_family"): return
-        docs, metas = await search_file(settings.get("steward_mealplans_folder", STEWARD_MEALPLANS_FOLDER), "all", "dietary preferences", k=5)
-        prefs = "\n".join([m.get('window', d) for d, m in zip(docs, metas)])
-        prompt = f"Create meal plan. Pantry:\n{pantry}\nPrefs:\n{prefs}"
-        plan = await get_ai_response([{"role": "system", "content": settings.get("mealplan_generation_prompt")}, {"role": "user", "content": prompt}], model=settings.get("llm_model"))
-        await send_email(f"Meal Plan - {date.today()}", plan, settings.get("recipient_email_family"))
-        await asyncio.to_thread(os.remove, file_path)
-    except Exception: pass
-
-async def _upsert_nutrition(conn, data):
-    today = date.today()
-    async with conn.execute("SELECT * FROM daily_nutrition WHERE date = ?", (today,)) as cur: row = await cur.fetchone()
-    current_cals = row["total_calories"] if row else 0
-    current_prot = row["protein_g"] if row else 0
-    vals = {
-        "calories": current_cals + (data.get("calories") or 0),
-        "protein": current_prot + (data.get("protein") or 0),
-        "carbs": (row["carbs_g"] if row else 0) + (data.get("carbs") or 0),
-        "fat": (row["fat_g"] if row else 0) + (data.get("fat") or 0)
-    }
-    await conn.execute("INSERT OR REPLACE INTO daily_nutrition (date, total_calories, protein_g, carbs_g, fat_g, source) VALUES (?,?,?,?,?,?)",
-        (today, vals["calories"], vals["protein"], vals["carbs"], vals["fat"], "voice/vision"))
-    await conn.commit()
-
-async def process_mixed_image(file_path: Path, conn: aiosqlite.Connection, ollama: Any, settings: Dict[str, Any]):
-    if not settings.get("vision_model"): return
-    pass 
+        import pypdf
+        def _read():
+            reader = pypdf.PdfReader(file_path)
+            full_text = []
+            for page in reader.pages:
+                full_text.append(page.extract_text())
+            return "\n".join(full_text)
+        
+        text = await asyncio.to_thread(_read)
+        return text
+    except ImportError:
+        return "[PDF Content - Install pypdf for extraction]"
+    except Exception as e:
+        return f"[PDF Error: {e}]"
 
 # --- CORE PROCESSING ---
 
@@ -173,15 +143,47 @@ async def classify_and_move_single(f: Path, conn: aiosqlite.Connection, settings
     """Classifies a single file using LLM, bounded by semaphore."""
     async with sem:
         try:
-            async with aiofiles.open(f, 'r', encoding='utf-8', errors='ignore') as r: snip = await r.read(500)
+            # READ CONTENT (Handle Text, Audio, PDF)
+            content_to_analyze = ""
+            is_media_converted = False
             
+            # 1. TEXT FILES
+            if f.suffix.lower() in ['.txt', '.md', '.json', '.csv']:
+                async with aiofiles.open(f, 'r', encoding='utf-8', errors='ignore') as r: 
+                    content_to_analyze = await r.read(1000)
+
+            # 2. AUDIO FILES (Magic Transcribe)
+            elif f.suffix.lower() in ['.mp3', '.wav', '.m4a', '.webm', '.ogg']:
+                print(f"  [MAGIC] 🎙️ Transcribing {f.name}...")
+                transcript = await transcribe_audio_file(f)
+                if transcript:
+                    content_to_analyze = transcript
+                    is_media_converted = True
+                    # Replace audio file with text file
+                    new_path = f.with_suffix('.txt')
+                    async with aiofiles.open(new_path, 'w', encoding='utf-8') as w:
+                        await w.write(f"Transcribed from {f.name}:\n\n{transcript}")
+                    # Delete original audio
+                    await asyncio.to_thread(os.remove, f)
+                    f = new_path # Point to new text file for moving
+
+            # 3. PDF FILES (Magic OCR/Extract)
+            elif f.suffix.lower() == '.pdf':
+                print(f"  [MAGIC] 📄 Extracting PDF {f.name}...")
+                pdf_text = await extract_pdf_text(f)
+                if pdf_text and len(pdf_text) > 10:
+                    content_to_analyze = pdf_text[:1000]
+            
+            if not content_to_analyze:
+                return
+
             prompt = f"""
             Analyze this document snippet. 
             1. Classify into: {', '.join(targets)}.
             2. Generate 3 tags.
             Format: "CATEGORY | #tag1 #tag2"
             """
-            resp = await get_ai_response([{"role": "system", "content": prompt}, {"role": "user", "content": f"File: {f.name}\n{snip}"}], model=settings.get("llm_model"))
+            resp = await get_ai_response([{"role": "system", "content": prompt}, {"role": "user", "content": f"File: {f.name}\n{content_to_analyze}"}], model=settings.get("llm_model"))
             
             parts = resp.split('|')
             choice = parts[0].strip().lower().replace('.','')
@@ -209,38 +211,17 @@ async def process_ingest_folder(ollama: Any, conn: aiosqlite.Connection, setting
     if not path.exists(): return
     
     # 1. Pre-filter Files
-    files_to_process = []
     files_to_classify = []
-    
-    tag_map = {"REMINDER": "steward_reminders_folder", "CONTEXT": "steward_context_folder", "FINANCE": "steward_finance_folder"}
     
     for f in path.iterdir():
         if not f.is_file() or f.name.startswith('.'): continue
         if f.suffix.lower() not in SUPPORTED_EXTENSIONS and f.suffix.lower() not in IMAGE_EXTENSIONS: continue
         
-        match = re.search(r"_TAG-([A-Z]+)\.", f.name)
-        if match:
-            files_to_process.append((f, match.group(1).upper()))
-        elif f.suffix.lower() in IMAGE_EXTENSIONS:
-            files_to_process.append((f, "IMAGE"))
-        else:
-            files_to_classify.append(f)
+        files_to_classify.append(f)
 
-    # 2. Handle Tagged Files
-    for f, tag in files_to_process:
-        if tag == "JOURNAL": await process_journal_memo(f, conn, settings)
-        elif tag == "WORKOUT": await process_workout_memo(f, conn, ollama, settings)
-        elif tag == "DIET": await process_nutrition_memo(f, conn, ollama, settings)
-        elif tag == "MEALPLAN": await process_meal_plan_memo(f, conn, ollama, settings)
-        elif tag == "IMAGE": await process_mixed_image(f, conn, ollama, settings)
-        elif tag in tag_map:
-             dest = DOCS_PATH / settings.get(tag_map[tag], "Vault_Documents")
-             dest.mkdir(exist_ok=True, parents=True)
-             shutil.move(str(f), str(dest / f.name))
-
-    # 3. Parallel Classification
+    # 2. Parallel Classification
     if files_to_classify:
-        print(f"  [MAGIC] Classifying {len(files_to_classify)} files...")
-        # CRITICAL FIX: Changed from 4 to 1. Local LLM cannot run in parallel.
+        print(f"  [MAGIC] Processing {len(files_to_classify)} items in Inbox...")
+        # Use semaphore to limit concurrency
         sem = asyncio.Semaphore(1) 
         await asyncio.gather(*[classify_and_move_single(f, conn, settings, targets, sem) for f in files_to_classify])

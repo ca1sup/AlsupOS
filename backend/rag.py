@@ -1,3 +1,4 @@
+
 import os
 import sys
 import time
@@ -15,6 +16,8 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["ALLOW_RESET"] = "True"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
+# FIX: Disable HuggingFace progress bars to prevent TQDM threading crashes on macOS
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 # FIX: Import Settings for robust client configuration
 from chromadb import PersistentClient, Collection

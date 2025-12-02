@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { X, Upload, Link, FileText, Loader2, CheckCircle } from 'lucide-react';
+import { X, Upload, Link, FileText, Loader2, CheckCircle, FolderOpen } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAppStore } from '../store/useAppStore';
 
@@ -12,30 +12,30 @@ interface IngestModalProps {
 const IngestModal: React.FC<IngestModalProps> = ({ isOpen, onClose }) => {
   const [activeTab, setActiveTab] = useState<'file' | 'url'>('file');
   const [url, setUrl] = useState('');
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<'idle' | 'success' | 'error'>('idle');
   
-  // Note: These actions require the Store updates from Batch 4.5
-  const { ingestFile, ingestUrl } = useAppStore();
+  // Use store for progress logic
+  const { ingestFile, ingestUrl, ingestProgress, selectedFolder } = useAppStore();
+  const [localStatus, setLocalStatus] = useState<'idle' | 'success' | 'error'>('idle');
+
+  // Helper to determine where files are going
+  const destination = selectedFolder === 'all' ? 'Inbox' : selectedFolder;
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
-    setIsUploading(true);
-    setUploadStatus('idle');
+    setLocalStatus('idle');
     try {
+      // Ingest sequentially or parallel (useAppStore logic handles one by one in loop usually)
       for (const file of acceptedFiles) {
         await ingestFile(file);
       }
-      setUploadStatus('success');
+      setLocalStatus('success');
       setTimeout(() => {
           onClose();
-          setUploadStatus('idle');
+          setLocalStatus('idle');
       }, 1500);
     } catch (e) {
       console.error(e);
-      setUploadStatus('error');
-    } finally {
-      setIsUploading(false);
+      setLocalStatus('error');
     }
   }, [ingestFile, onClose]);
 
@@ -47,19 +47,16 @@ const IngestModal: React.FC<IngestModalProps> = ({ isOpen, onClose }) => {
   const handleUrlSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!url) return;
-    setIsUploading(true);
     try {
       await ingestUrl(url);
-      setUploadStatus('success');
+      setLocalStatus('success');
       setUrl('');
       setTimeout(() => {
         onClose();
-        setUploadStatus('idle');
+        setLocalStatus('idle');
       }, 1500);
     } catch {
-      setUploadStatus('error');
-    } finally {
-      setIsUploading(false);
+      setLocalStatus('error');
     }
   };
 
@@ -78,7 +75,13 @@ const IngestModal: React.FC<IngestModalProps> = ({ isOpen, onClose }) => {
         
         {/* Header */}
         <div className="px-6 py-5 border-b border-earth-800/50 flex items-center justify-between">
-          <h2 className="font-serif text-xl text-earth-200 italic">Add Knowledge</h2>
+          <div>
+            <h2 className="font-serif text-xl text-earth-200 italic">Add Knowledge</h2>
+            <div className="flex items-center gap-1.5 mt-1 text-xs text-earth-500 font-medium uppercase tracking-wide">
+                <FolderOpen className="w-3 h-3" />
+                <span>Saving to: <span className="text-flair-sage">{destination}</span></span>
+            </div>
+          </div>
           <button 
             onClick={onClose}
             className="p-2 text-earth-500 hover:text-earth-200 hover:bg-white/5 rounded-full transition-colors"
@@ -121,7 +124,7 @@ const IngestModal: React.FC<IngestModalProps> = ({ isOpen, onClose }) => {
                <div 
                  {...getRootProps()} 
                  className={cn(
-                    "h-48 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center text-center cursor-pointer transition-all duration-300 group",
+                    "h-48 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center text-center cursor-pointer transition-all duration-300 group relative",
                     isDragActive 
                         ? "border-flair-sage bg-flair-sage/10" 
                         : "border-earth-800 hover:border-earth-600 hover:bg-earth-800/30"
@@ -152,7 +155,7 @@ const IngestModal: React.FC<IngestModalProps> = ({ isOpen, onClose }) => {
                   </div>
                   <button 
                     type="submit" 
-                    disabled={!url || isUploading}
+                    disabled={!url || ingestProgress.running}
                     className="w-full py-3.5 bg-earth-200 text-earth-950 font-bold rounded-xl hover:bg-white active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Fetch Content
@@ -160,18 +163,33 @@ const IngestModal: React.FC<IngestModalProps> = ({ isOpen, onClose }) => {
                </form>
            )}
 
-           {/* Status Indicator */}
-           {isUploading && (
-               <div className="absolute inset-0 bg-earth-950/80 backdrop-blur-sm flex flex-col items-center justify-center rounded-3xl z-10">
-                   <Loader2 className="w-10 h-10 text-flair-sage animate-spin mb-3" />
-                   <p className="text-earth-200 font-medium animate-pulse">Ingesting knowledge...</p>
+           {/* Progress Overlay */}
+           {ingestProgress.running && (
+               <div className="absolute inset-0 bg-earth-900/95 backdrop-blur-md flex flex-col items-center justify-center rounded-3xl z-10 p-8 animate-fade-in">
+                   <div className="w-full max-w-xs mb-4">
+                       <div className="flex justify-between text-xs text-earth-300 mb-2 font-bold uppercase tracking-wider">
+                           <span>{ingestProgress.message}</span>
+                           <span>{ingestProgress.percent}%</span>
+                       </div>
+                       <div className="w-full bg-earth-800 rounded-full h-2 overflow-hidden">
+                           <div 
+                                className="bg-flair-sage h-2 rounded-full transition-all duration-300 ease-out" 
+                                style={{ width: `${ingestProgress.percent}%` }}
+                           />
+                       </div>
+                   </div>
+                   <Loader2 className="w-8 h-8 text-flair-sage animate-spin opacity-50" />
                </div>
            )}
 
-           {uploadStatus === 'success' && !isUploading && (
-               <div className="absolute inset-0 bg-earth-950/90 backdrop-blur-sm flex flex-col items-center justify-center rounded-3xl z-10 animate-fade-in">
-                   <CheckCircle className="w-12 h-12 text-flair-sage mb-3" />
-                   <p className="text-earth-200 font-bold text-lg">Added to Brain</p>
+           {/* Success State */}
+           {localStatus === 'success' && !ingestProgress.running && (
+               <div className="absolute inset-0 bg-earth-950/95 backdrop-blur-md flex flex-col items-center justify-center rounded-3xl z-20 animate-fade-in">
+                   <div className="w-16 h-16 rounded-full bg-flair-sage/20 flex items-center justify-center mb-4">
+                        <CheckCircle className="w-8 h-8 text-flair-sage" />
+                   </div>
+                   <p className="text-earth-200 font-bold text-lg">Saved to {destination}</p>
+                   <p className="text-earth-500 text-sm mt-1">Ready for indexing</p>
                </div>
            )}
         </div>

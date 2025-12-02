@@ -11,7 +11,7 @@ import {
 import { cn } from '../lib/utils';
 import { toast } from 'react-toastify';
 
-// --- NEW INTERFACES ---
+// --- INTERFACES ---
 interface CriticalAlert {
   alert: string;
   severity: 'CRITICAL' | 'URGENT' | 'IMPORTANT';
@@ -297,7 +297,7 @@ const ClinicalView: React.FC = () => {
   const navigate = useNavigate();
   const { 
     erPatients, fetchERPatients, createERPatient, 
-    currentChart, fetchERChart, archivePatient,
+    currentChart, fetchERChart, archivePatient, deleteERPatient,
     medicalSources, fetchMedicalSources, addMedicalSource, deleteMedicalSource
   } = useAppStore();
   
@@ -361,9 +361,17 @@ const ClinicalView: React.FC = () => {
 
   const handleArchive = async () => {
       if (!selectedPatient) return;
-      if (confirm("Archive this patient?")) {
-          await archivePatient(selectedPatient.id);
+      await archivePatient(selectedPatient.id);
+      setSelectedPatient(null);
+      toast.success("Patient Archived");
+  };
+
+  const handleDelete = async () => {
+      if (!selectedPatient) return;
+      if (confirm("Permanently delete this patient and all records?")) {
+          await deleteERPatient(selectedPatient.id);
           setSelectedPatient(null);
+          toast.success("Patient Deleted");
       }
   };
 
@@ -478,8 +486,15 @@ const ClinicalView: React.FC = () => {
                     {/* Archive / Close Actions */}
                     <div className="absolute right-6 top-6 flex items-center gap-3">
                         <button 
+                            onClick={handleDelete}
+                            className="p-2.5 text-txt-tertiary hover:text-red-500 hover:bg-red-500/10 rounded-xl transition-colors"
+                            title="Delete Record"
+                        >
+                            <Trash2 size={20} />
+                        </button>
+                        <button 
                             onClick={handleArchive} 
-                            className="p-2.5 text-txt-tertiary hover:text-red-400 hover:bg-red-500/10 rounded-xl transition-colors"
+                            className="p-2.5 text-txt-tertiary hover:text-accent hover:bg-accent/10 rounded-xl transition-colors"
                             title="Archive Patient"
                         >
                             <Archive size={20} />
