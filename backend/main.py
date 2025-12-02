@@ -2,6 +2,14 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+# CRITICAL FIX: Enforce 'spawn' start method for multiprocessing on macOS
+# This prevents child processes from inheriting corrupted Metal/GPU contexts.
+import multiprocessing
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
 from fastapi import (
     FastAPI, WebSocket, HTTPException, WebSocketDisconnect,
     UploadFile, File, Request, BackgroundTasks
@@ -17,6 +25,7 @@ import zipfile
 import tempfile
 import shutil
 import logging
+import gc
 from contextlib import asynccontextmanager
 from multiprocessing import Process, Queue
 from urllib.parse import unquote # Added for safe model deletion
@@ -53,6 +62,9 @@ from backend.calendar_sync import run_calendar_sync
 from backend.web_search import perform_web_search 
 from backend.agent import agent_stream
 from backend.er_agent import process_er_audio_update, ER_STATUS
+
+# NEW: Import ER DB functions directly to ensure read/write consistency
+from backend.er_db import get_active_er_patients, get_er_patient_data
 
 # Ingest Worker Import
 from backend.ingest import run_ingest_process
@@ -114,12 +126,13 @@ from backend.database import (
     update_persona, 
     delete_persona,
     get_sentiment_history,
-    create_er_patient, get_active_er_patients, get_latest_er_chart,
+    create_er_patient, 
+    # Removed legacy ER imports to avoid confusion
     archive_er_patient, delete_er_patient,
     get_medical_sources, add_medical_source, delete_medical_source,
     init_db, get_sessions, create_session, delete_session,
     get_chat_history, get_folders, get_files_in_folder,
-    get_er_dashboard_data, get_er_chart,
+    get_er_dashboard_data, 
     get_all_settings, update_settings, update_session_name as update_chat_session_name
 )
 
@@ -136,9 +149,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- GLOBAL INGEST STATE ---
+# --- GLOBAL INGEST STATE & LOCKS ---
 ingest_process: Optional[Process] = None
 ingest_status_queue: Optional[Queue] = None
+
+# MLX Lock: Serializes access to GPU/Metal resources
+MLX_LOCK = asyncio.Lock()
 
 # --- LIFESPAN MANAGER ---
 @asynccontextmanager
@@ -304,15 +320,9 @@ async def api_get_models():
     models = []
     
     # 1. Scan Local Models Directory
-    # Look deeper than just top level to find actual models
     if MODELS_DIR.exists():
-        # First, check immediate subdirectories (standard structure)
         candidates = [p for p in MODELS_DIR.iterdir() if p.is_dir() and not p.name.startswith('.')]
-        
-        # Second, checking for deeper nested hugginface structures
-        # e.g. models/mlx-community/Phi-3...
         for p in candidates:
-            # Check if this folder itself is a model (has config.json)
             if (p / "config.json").exists():
                 models.append({
                     "name": p.name,
@@ -321,10 +331,8 @@ async def api_get_models():
                     "source": "Local (MLX)"
                 })
             else:
-                # Check one level deeper for namespaced models
                 for sub in p.iterdir():
                     if sub.is_dir() and (sub / "config.json").exists():
-                        # Use relative path as name for clarity: "mlx-community/Phi-3"
                         rel_name = f"{p.name}/{sub.name}"
                         models.append({
                             "name": rel_name,
@@ -334,7 +342,6 @@ async def api_get_models():
                         })
 
     # 2. Add Default if missing (Virtual entry)
-    # Only add if we haven't found it locally yet
     if not any(m['name'] == DEFAULT_MLX_MODEL for m in models):
         models.append({
             "name": DEFAULT_MLX_MODEL,
@@ -354,8 +361,6 @@ def _download_model_task(repo_id: str):
         logger.info(f"📥 Starting download for {repo_id}...")
         from huggingface_hub import snapshot_download
         
-        # Download to specific folder in MODELS_DIR
-        # Use full path to avoid flat structure collisions
         target_dir = MODELS_DIR / repo_id
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         
@@ -370,37 +375,26 @@ def _download_model_task(repo_id: str):
 
 @app.post("/api/models/pull")
 async def api_pull_model(payload: PullModelPayload, background_tasks: BackgroundTasks):
-    """Triggers background download of a Hugging Face model."""
     background_tasks.add_task(_download_model_task, payload.repo_id)
     return {"status": "started", "message": f"Downloading {payload.repo_id} in background..."}
 
 @app.delete("/api/models/{model_id:path}")
 async def api_delete_model(model_id: str):
-    """Deletes a model directory."""
     try:
-        # Decode the URL-encoded path (e.g., "mlx-community%2FPhi-3" -> "mlx-community/Phi-3")
         decoded_id = unquote(model_id)
-        
-        # Construct path safely
         target_path = (MODELS_DIR / decoded_id).resolve()
         
-        # Security check: ensure we are only deleting inside MODELS_DIR
         if not str(target_path).startswith(str(MODELS_DIR.resolve())):
-            logger.warning(f"Delete blocked: {target_path} is outside {MODELS_DIR}")
             raise HTTPException(status_code=403, detail="Access denied")
             
         if target_path.exists() and target_path.is_dir():
             shutil.rmtree(target_path)
-            
-            # Clean up parent if empty (e.g. if we deleted the last model in 'mlx-community')
             parent = target_path.parent
             if parent != MODELS_DIR and not any(parent.iterdir()):
                 try: parent.rmdir()
                 except: pass
-                
             return {"status": "success", "message": f"Deleted {decoded_id}"}
         else:
-            logger.warning(f"Model delete 404: {target_path} does not exist.")
             raise HTTPException(status_code=404, detail="Model not found")
     except Exception as e:
         logger.error(f"Delete failed: {e}")
@@ -463,6 +457,22 @@ async def api_update_task(tid: int, payload: TaskStatusPayload):
     return {"status": "success"}
 
 # === ER CLINICAL AID ENDPOINTS ===
+
+# Wrapper to safely run the ER Agent within the MLX Lock
+# This prevents the background agent from clashing with foreground transcription/chat
+async def safe_er_agent_task(pid: int, transcript: str):
+    # CRITICAL: Wait 2.0s (was 0.5s) to let Metal/GPU flush pending commands from the Whisper job
+    await asyncio.sleep(2.0)
+    
+    async with MLX_LOCK:
+        logger.info(f"🔒 MLX Lock Acquired for Agent (Patient {pid})")
+        try:
+            await process_er_audio_update(pid, transcript)
+        except Exception as e:
+            logger.error(f"❌ Error in ER Agent: {e}", exc_info=True)
+        finally:
+            logger.info(f"🔓 MLX Lock Released (Patient {pid})")
+
 class ERPatientPayload(BaseModel):
     room: str
     complaint: str
@@ -477,13 +487,40 @@ class MedSourcePayload(BaseModel):
     url: str
 
 @app.get("/api/er/dashboard")
-async def api_er_dashboard(): return {"patients": await get_active_er_patients()}
+async def api_er_dashboard(): 
+    # Use the new DB accessor directly
+    return {"patients": await get_active_er_patients()}
+
 @app.post("/api/er/patient")
-async def api_create_er_patient(p: ERPatientPayload): pid = await create_er_patient(p.room, p.complaint, p.age_sex); return {"id": pid, "status": "success"}
+async def api_create_er_patient(p: ERPatientPayload): 
+    pid = await create_er_patient(p.room, p.complaint, p.age_sex); 
+    return {"id": pid, "status": "success"}
+
 @app.get("/api/er/chart/{pid}")
-async def api_get_er_chart(pid: int): chart = await get_latest_er_chart(pid); return {"chart": chart}
+async def api_get_er_chart(pid: int): 
+    # FIX: Read from the new DB source (er_db) instead of legacy database.py
+    data = await get_er_patient_data(pid)
+    if not data:
+        return {"chart": None}
+    
+    # MAP: Transform keys to match what Frontend expects
+    # DB: chart_content, advisor_analysis
+    # FE Expects: chart_markdown, clinical_guidance_json
+    chart = {
+        "id": data.get("id"),
+        "patient_id": data.get("id"),
+        "chart_markdown": data.get("chart_content", ""),
+        "clinical_guidance_json": data.get("advisor_analysis", ""),
+        "created_at": data.get("created_at")
+    }
+    return {"chart": chart}
+
 @app.post("/api/er/update_text")
-async def api_er_update_text(p: ERTextUpdatePayload): asyncio.create_task(process_er_audio_update(p.patient_id, p.transcript)); return {"status": "success", "message": "Agent processing..."}
+async def api_er_update_text(p: ERTextUpdatePayload): 
+    # Use safe wrapper to respect MLX Lock
+    asyncio.create_task(safe_er_agent_task(p.patient_id, p.transcript))
+    return {"status": "success", "message": "Agent processing..."}
+
 @app.post("/api/er/archive/{pid}")
 async def api_er_archive(pid: int, disposition: str = "Discharged"): await archive_er_patient(pid, disposition); return {"status": "success"}
 @app.delete("/api/er/patient/{pid}")
@@ -513,10 +550,21 @@ async def api_er_update_audio(pid: int, file: UploadFile = File(...)):
         def _transcribe():
             return model.transcribe(str(temp_path), initial_prompt=MEDICAL_SPEECH_PROMPT)
             
-        res = await asyncio.to_thread(_transcribe)
+        # Protect Transcription with Lock and Logging
+        async with MLX_LOCK:
+            logger.info("🔒 MLX Lock Acquired for Whisper")
+            res = await asyncio.to_thread(_transcribe)
+            logger.info("🔓 MLX Lock Released after Whisper")
+            
         transcript = res.get("text", "").strip()
         
-        asyncio.create_task(process_er_audio_update(pid, transcript))
+        # EXPLICIT CLEANUP: Remove reference and force GC to clear Metal buffers
+        del res
+        gc.collect()
+        
+        # Schedule Agent Task (which also acquires lock internally)
+        asyncio.create_task(safe_er_agent_task(pid, transcript))
+        
         return {"status": "success", "transcript": transcript, "message": "Agent processing..."}
     finally:
         if temp_path.exists(): os.remove(temp_path)
@@ -584,7 +632,9 @@ async def api_transcribe_temp(file: UploadFile = File(...)):
         def _transcribe():
             return model.transcribe(str(temp_path))
             
-        res = await asyncio.to_thread(_transcribe)
+        async with MLX_LOCK:
+            res = await asyncio.to_thread(_transcribe)
+            
         transcript = res.get("text", "").strip()
         return {"transcript": transcript}
     finally:
@@ -625,11 +675,11 @@ async def api_save_note(p: NotePayload):
     
     async with aiofiles.open(file_path, "a", encoding="utf-8") as f:
         if p.category == "Reminder":
-            await f.write(f"\n[ ] {p.content.strip()}")
+            await f.write(f"\\n[ ] {p.content.strip()}")
             try: await asyncio.to_thread(add_reminder_to_app, p.content.strip(), "Inbox")
             except: pass
         else:
-            await f.write(f"\n\n### {p.category} Entry @ {timestamp}\n{p.content.strip()}\n")
+            await f.write(f"\\n\\n### {p.category} Entry @ {timestamp}\\n{p.content.strip()}\\n")
             
     await trigger_ingest_logic()
     return {"status": "success"}
@@ -676,7 +726,7 @@ async def api_clip_webpage(payload: ClipPayload):
         path.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r'[^a-zA-Z0-9_-]', '_', payload.url.split("://")[-1])[:100]
         async with aiofiles.open(path / f"clip_{safe}.md", "w", encoding="utf-8") as f:
-            await f.write(f"# Clip from: {payload.url}\n\n> {payload.content}\n")
+            await f.write(f"# Clip from: {payload.url}\\n\\n> {payload.content}\\n")
         await trigger_ingest_logic()
         return {"status": "success"}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
@@ -719,7 +769,7 @@ async def api_voice_command(cmd: VoiceCommand):
     folder = settings.get("steward_reminders_folder", STEWARD_REMINDERS_FOLDER)
     path = DOCS_PATH / folder / "voice_inbox.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiofiles.open(path, "a", encoding="utf-8") as f: await f.write(f"{cmd.text.strip()}\n")
+    async with aiofiles.open(path, "a", encoding="utf-8") as f: await f.write(f"{cmd.text.strip()}\\n")
     await trigger_ingest_logic()
     return {"status": "success", "message": "Command received"}
 
@@ -739,7 +789,11 @@ async def ws_audio(ws: WebSocket):
                 await f.flush()
                 def _transcribe():
                     return model.transcribe(str(temp_audio_path), initial_prompt=MEDICAL_SPEECH_PROMPT)
-                result = await asyncio.to_thread(_transcribe)
+                
+                # Protect Streaming Transcription
+                async with MLX_LOCK:
+                    result = await asyncio.to_thread(_transcribe)
+                    
                 text = result.get("text", "").strip()
                 if text: await ws.send_text(text)
     except WebSocketDisconnect: pass
@@ -765,55 +819,57 @@ async def ws_rag(ws: WebSocket):
 
             AGENT_PERSONAS = {"Steward", "Clinical", "CFO", "Coach", "Mentor", "Vault"}
             
-            if persona in AGENT_PERSONAS:
+            # Wrap RAG Generation in Lock to prevent collision with Whisper or other Agents
+            async with MLX_LOCK:
+                if persona in AGENT_PERSONAS:
+                    full_resp = ""
+                    collected_sources = []
+                    async for token in agent_stream(query, sid, persona, folder, filename, history=chat_history): 
+                        if isinstance(token, dict) and token.get("type") == "sources":
+                            await ws.send_json(token)
+                            collected_sources = token.get("data", [])
+                        else:
+                            await ws.send_json({"type": "token", "data": token})
+                            full_resp += token
+                    
+                    if collected_sources:
+                        try:
+                            src_str = json.dumps(collected_sources)
+                            full_resp += f"\\n<sources>{src_str}</sources>"
+                        except: pass
+
+                    await add_chat_message(sid, "assistant", full_resp, persona=persona)
+                    await ws.send_json({"type": "done"})
+                    continue
+
+                if persona == "Chat":
+                    full_resp = ""
+                    async for token in generate_bare_stream(query, chat_history, persona_name="Chat"):
+                        await ws.send_json({"type": "token", "data": token})
+                        full_resp += token
+                    await add_chat_message(sid, "assistant", full_resp, persona="Chat")
+                    await ws.send_json({"type": "done"})
+                    continue
+                
+                # Fallback
                 full_resp = ""
                 collected_sources = []
-                async for token in agent_stream(query, sid, persona, folder, filename, history=chat_history): 
+                async for token in agent_stream(query, sid, persona, folder, filename, history=chat_history):
                     if isinstance(token, dict) and token.get("type") == "sources":
-                         await ws.send_json(token)
-                         collected_sources = token.get("data", [])
+                        await ws.send_json(token)
+                        collected_sources = token.get("data", [])
                     else:
-                         await ws.send_json({"type": "token", "data": token})
-                         full_resp += token
+                        await ws.send_json({"type": "token", "data": token})
+                        full_resp += token
                 
                 if collected_sources:
-                     try:
-                         src_str = json.dumps(collected_sources)
-                         full_resp += f"\n<sources>{src_str}</sources>"
-                     except: pass
+                    try:
+                        src_str = json.dumps(collected_sources)
+                        full_resp += f"\\n<sources>{src_str}</sources>"
+                    except: pass
 
                 await add_chat_message(sid, "assistant", full_resp, persona=persona)
                 await ws.send_json({"type": "done"})
-                continue
-
-            if persona == "Chat":
-                full_resp = ""
-                async for token in generate_bare_stream(query, chat_history, persona_name="Chat"):
-                    await ws.send_json({"type": "token", "data": token})
-                    full_resp += token
-                await add_chat_message(sid, "assistant", full_resp, persona="Chat")
-                await ws.send_json({"type": "done"})
-                continue
-            
-            # Fallback
-            full_resp = ""
-            collected_sources = []
-            async for token in agent_stream(query, sid, persona, folder, filename, history=chat_history):
-                if isinstance(token, dict) and token.get("type") == "sources":
-                    await ws.send_json(token)
-                    collected_sources = token.get("data", [])
-                else:
-                    await ws.send_json({"type": "token", "data": token})
-                    full_resp += token
-            
-            if collected_sources:
-                 try:
-                     src_str = json.dumps(collected_sources)
-                     full_resp += f"\n<sources>{src_str}</sources>"
-                 except: pass
-
-            await add_chat_message(sid, "assistant", full_resp, persona=persona)
-            await ws.send_json({"type": "done"})
 
     except WebSocketDisconnect: pass
     except Exception as e: logger.error(f"WS Error: {e}", exc_info=True)

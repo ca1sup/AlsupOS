@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { 
     HardDrive, DownloadCloud, Trash2, Check, RefreshCw, 
-    Database, Activity, Search, AlertCircle, Cpu
+    Database, Activity, AlertCircle, Cpu
 } from 'lucide-react';
 import { useAppStore } from '../../../store/useAppStore';
 import { toast } from 'react-toastify';

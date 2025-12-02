@@ -70,22 +70,25 @@ async def process_er_audio_update(patient_id: int, transcript: str):
         Task: Analyze this case. Give me the 'Wingman' perspective.
         """
 
-        # 4. Run Parallel Inference
-        logger.info(f"Running ER Agents for Patient {patient_id}...")
+        # 4. Run Sequential Inference (Fix for Metal/AGX Crash)
+        # CRITICAL FIX: Replaced asyncio.gather with sequential awaits.
+        # Running both agents concurrently causes a race condition on the Metal Command Encoder.
+        logger.info(f"Running ER Agents for Patient {patient_id} (Sequential)...")
         
-        results = await asyncio.gather(
-            get_ai_response([
-                {"role": "system", "content": scribe_prompt},
-                {"role": "user", "content": scribe_user_msg}
-            ]),
-            get_ai_response([
-                {"role": "system", "content": advisor_prompt},
-                {"role": "user", "content": advisor_user_msg}
-            ])
-        )
+        # 4a. Run Scribe
+        new_chart_content = await get_ai_response([
+            {"role": "system", "content": scribe_prompt},
+            {"role": "user", "content": scribe_user_msg}
+        ])
         
-        new_chart_content = results[0]
-        advisor_analysis = results[1]
+        # Brief cooldown for Metal/GPU buffer to clear
+        await asyncio.sleep(0.5)
+
+        # 4b. Run Advisor
+        advisor_analysis = await get_ai_response([
+            {"role": "system", "content": advisor_prompt},
+            {"role": "user", "content": advisor_user_msg}
+        ])
 
         # 5. Save & Notify
         await save_er_chart(patient_id, new_chart_content, advisor_analysis)
