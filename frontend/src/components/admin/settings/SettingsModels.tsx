@@ -59,89 +59,79 @@ const SettingsModels: React.FC = () => {
   };
 
   return (
-    <div className="space-y-12 max-w-5xl animate-slide-up pb-20">
+    <div className="space-y-10 max-w-4xl animate-slide-up pb-20">
       
       {/* Header */}
-      <div className="flex justify-between items-end border-b border-border-invisible pb-8">
-        <div>
-          <h2 className="text-3xl font-light text-txt-primary tracking-tight">Neural Engine</h2>
-          <p className="text-txt-secondary mt-2 text-sm">Manage local inference models (MLX) and vector embeddings.</p>
-        </div>
+      <div className="border-b border-border-invisible pb-6">
+        <h2 className="text-2xl font-light text-txt-primary tracking-tight">Neural Engine</h2>
+        <p className="text-txt-secondary mt-1 text-sm">Manage local inference models and embeddings.</p>
       </div>
 
       {/* 1. Active Configuration */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="p-6 bg-surface border border-border-subtle rounded-2xl relative overflow-hidden group">
-              <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                  <Cpu size={100} />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="p-5 bg-surface border border-border-subtle rounded-xl flex flex-col justify-between">
+              <div className="flex items-center gap-2 mb-3">
+                  <Activity size={16} className="text-accent" />
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-txt-tertiary">Active LLM</h3>
               </div>
-              <div className="flex items-center gap-3 mb-4">
-                  <div className="p-2 bg-accent/10 rounded-lg text-accent"><Activity size={20} /></div>
-                  <h3 className="text-sm font-bold uppercase tracking-widest text-txt-secondary">Active LLM</h3>
-              </div>
-              <div className="text-xl font-mono text-white mb-2 truncate max-w-[280px]" title={settings.llm_model}>
+              <div className="text-base font-mono text-txt-primary mb-1 break-all">
                   {settings.llm_model || 'Loading...'}
               </div>
-              <p className="text-xs text-txt-tertiary">Used for Chat, Agents, and Summarization.</p>
+              <p className="text-xs text-txt-tertiary">Used for Chat & Agents</p>
           </div>
 
-          <div className="p-6 bg-surface border border-border-subtle rounded-2xl relative overflow-hidden group opacity-75">
-              <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                  <Database size={100} />
+          <div className="p-5 bg-surface border border-border-subtle rounded-xl flex flex-col justify-between opacity-80">
+              <div className="flex items-center gap-2 mb-3">
+                  <Database size={16} className="text-txt-tertiary" />
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-txt-tertiary">Embedding Model</h3>
               </div>
-              <div className="flex items-center gap-3 mb-4">
-                  <div className="p-2 bg-white/5 rounded-lg text-txt-secondary"><Search size={20} /></div>
-                  <h3 className="text-sm font-bold uppercase tracking-widest text-txt-secondary">Embedding Model</h3>
-              </div>
-              <div className="text-lg font-mono text-txt-secondary mb-2 truncate">
+              <div className="text-base font-mono text-txt-secondary mb-1">
                   nomic-embed-text-v1.5
               </div>
-              <p className="text-xs text-txt-tertiary">Hardcoded for vector compatibility.</p>
+              <p className="text-xs text-txt-tertiary">Vector Database Core</p>
           </div>
       </div>
 
       {/* 2. Download Hub */}
-      <section className="space-y-6">
-          <div className="flex items-center gap-3">
-              <DownloadCloud className="text-accent" size={20} />
-              <h3 className="text-xl font-light text-txt-primary">Download New Model</h3>
+      <section className="space-y-4">
+          <div className="flex items-center gap-2">
+              <DownloadCloud className="text-txt-secondary" size={18} />
+              <h3 className="text-lg font-light text-txt-primary">Download Model</h3>
           </div>
           
-          <div className="p-1 bg-gradient-to-r from-border-subtle to-transparent rounded-xl">
-            <div className="bg-void rounded-xl p-1 flex gap-2">
+          <div className="bg-surface border border-border-subtle rounded-lg p-1 flex gap-2">
                 <input 
                     value={downloadInput}
                     onChange={(e) => setDownloadInput(e.target.value)}
-                    placeholder="Hugging Face Repo ID (e.g. mlx-community/Phi-3-mini-4k-instruct)"
-                    className="flex-1 bg-transparent border-none px-4 py-3 text-sm text-txt-primary placeholder-txt-tertiary focus:outline-none font-mono"
+                    placeholder="Hugging Face Repo ID (e.g. mlx-community/Phi-3...)"
+                    className="flex-1 bg-transparent border-none px-3 py-2 text-sm text-txt-primary placeholder-txt-tertiary focus:outline-none font-mono"
                 />
                 <button 
                     onClick={handlePull}
                     disabled={isDownloading || !downloadInput}
-                    className="bg-accent hover:bg-white text-void px-6 py-2 rounded-lg font-bold text-xs uppercase tracking-wider transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                    className="bg-elevated hover:bg-accent hover:text-white text-txt-secondary px-4 py-2 rounded text-xs font-bold uppercase tracking-wide transition-colors disabled:opacity-50 flex items-center gap-2"
                 >
                     {isDownloading ? <RefreshCw className="animate-spin" size={14}/> : <DownloadCloud size={14}/>}
                     {isDownloading ? "Queued" : "Pull"}
                 </button>
-            </div>
           </div>
-          <div className="flex items-start gap-2 text-xs text-txt-tertiary px-2">
+          <div className="flex items-start gap-2 text-xs text-txt-tertiary px-1">
               <AlertCircle size={14} className="mt-0.5 shrink-0" />
-              <p>Models are downloaded to <code>/backend/models</code>. Ensure you have sufficient disk space. Large models (70B+) may take a long time.</p>
+              <p>Models download to <code>/backend/models</code>. Large models (70B+) may take time.</p>
           </div>
       </section>
 
       {/* 3. Local Library */}
-      <section className="space-y-6">
+      <section className="space-y-4">
           <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                  <HardDrive className="text-accent" size={20} />
-                  <h3 className="text-xl font-light text-txt-primary">Local Library</h3>
+              <div className="flex items-center gap-2">
+                  <HardDrive className="text-txt-secondary" size={18} />
+                  <h3 className="text-lg font-light text-txt-primary">Library</h3>
               </div>
-              <span className="text-xs font-mono text-txt-tertiary">{availableModels.length} Models Found</span>
+              <span className="text-xs font-mono text-txt-tertiary">{availableModels.length} Installed</span>
           </div>
 
-          <div className="grid grid-cols-1 gap-3">
+          <div className="flex flex-col gap-2">
               {availableModels.map((model: any) => {
                   const isActive = settings.llm_model === model.name;
                   const isDeleting = deletingId === model.name;
@@ -150,54 +140,53 @@ const SettingsModels: React.FC = () => {
                       <div 
                         key={model.name} 
                         className={cn(
-                            "flex items-center justify-between p-4 rounded-xl border transition-all",
+                            "flex items-center justify-between p-3 rounded-lg border transition-all",
                             isActive 
-                                ? "bg-accent/5 border-accent/20" 
+                                ? "bg-accent/5 border-accent/30" 
                                 : "bg-surface border-border-invisible hover:border-border-subtle"
                         )}
                       >
-                          <div className="flex items-center gap-4 overflow-hidden">
+                          <div className="flex items-center gap-3 overflow-hidden pr-4">
                               <div className={cn(
-                                  "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
-                                  isActive ? "bg-accent text-void" : "bg-elevated text-txt-tertiary"
+                                  "w-8 h-8 rounded flex items-center justify-center shrink-0",
+                                  isActive ? "bg-accent text-white" : "bg-elevated text-txt-tertiary"
                               )}>
-                                  {isActive ? <Check size={20} /> : <HardDrive size={20} />}
+                                  {isActive ? <Check size={16} /> : <Cpu size={16} />}
                               </div>
                               <div className="min-w-0">
-                                  <h4 className="font-mono text-sm text-txt-primary truncate" title={model.name}>
+                                  <h4 className="font-mono text-sm text-txt-primary break-all leading-tight" title={model.name}>
                                       {model.name}
                                   </h4>
-                                  <div className="flex items-center gap-3 text-xs text-txt-tertiary mt-1">
+                                  <div className="flex items-center gap-2 text-xs text-txt-tertiary mt-0.5">
                                       <span>{model.size}</span>
-                                      <span className="w-1 h-1 rounded-full bg-border-active" />
+                                      <span className="opacity-30">•</span>
                                       <span>{model.source}</span>
                                   </div>
                               </div>
                           </div>
 
-                          <div className="flex items-center gap-2 pl-4 shrink-0">
+                          <div className="flex items-center gap-2 shrink-0">
                               {!isActive && (
                                   <button 
                                     onClick={() => handleSetActive(model.name)}
-                                    className="px-4 py-2 bg-elevated hover:bg-white/10 text-txt-secondary hover:text-white rounded-lg text-xs font-bold uppercase tracking-wider transition-colors"
+                                    className="px-3 py-1.5 bg-elevated hover:bg-white/10 text-txt-secondary hover:text-white rounded text-xs font-bold uppercase tracking-wide transition-colors"
                                   >
-                                      Activate
+                                      Load
                                   </button>
                               )}
                               
-                              {/* Prevent deleting active model for safety */}
                               <button 
                                 onClick={() => handleDelete(model.name)}
                                 disabled={isActive || isDeleting}
                                 className={cn(
-                                    "p-2 rounded-lg transition-colors",
+                                    "p-1.5 rounded transition-colors",
                                     isActive 
                                         ? "opacity-0 cursor-default" 
                                         : "text-txt-tertiary hover:bg-red-500/10 hover:text-red-500"
                                 )}
                                 title="Delete Model"
                               >
-                                  {isDeleting ? <RefreshCw className="animate-spin" size={16} /> : <Trash2 size={16} />}
+                                  {isDeleting ? <RefreshCw className="animate-spin" size={14} /> : <Trash2 size={14} />}
                               </button>
                           </div>
                       </div>
@@ -205,7 +194,7 @@ const SettingsModels: React.FC = () => {
               })}
 
               {availableModels.length === 0 && (
-                  <div className="text-center py-12 border-2 border-dashed border-border-invisible rounded-xl text-txt-tertiary">
+                  <div className="text-center py-10 border border-dashed border-border-subtle rounded-lg text-txt-tertiary text-sm">
                       No models found in library.
                   </div>
               )}
