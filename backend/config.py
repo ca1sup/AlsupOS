@@ -65,7 +65,8 @@ MEDICAL_SPEECH_PROMPT = (
 )
 
 # === SYSTEM SETTINGS ===
-UPLOAD_CHUNK_SIZE = 1024 * 1024 * 5  
+# Increased to 50MB to support longer patient interview recordings
+UPLOAD_CHUNK_SIZE = 1024 * 1024 * 50  
 WS_RECEIVE_TIMEOUT = 300.0       
 WS_HEARTBEAT_INTERVAL = 30.0     
 DEFAULT_SEARCH_K = 5             

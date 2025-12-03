@@ -12,7 +12,8 @@ from backend.prompts import (
     SCRIBE_SYSTEM_PROMPT, 
     ADVISOR_SYSTEM_PROMPT, 
     DEFAULT_CHART_TEMPLATE,
-    ER_SEARCH_GENERATION_PROMPT
+    ER_SEARCH_GENERATION_PROMPT,
+    INTERVIEW_PROCESSOR_PROMPT
 )
 
 logger = logging.getLogger(__name__)
@@ -22,12 +23,13 @@ ER_STATUS: Dict[int, str] = {}
 async def process_er_audio_update(patient_id: int, transcript: str):
     """
     Core Logic:
-    1. Fetches Patient Data + Old Chart
-    2. Runs Scribe Agent -> Updates the Chart (HPI, MDM) based on new dictation.
-    3. Runs Search Generator -> Summarizes case into objective clinical terms.
-    4. Runs RAG Search -> Fetches relevant docs using the summary.
-    5. Runs Advisor Agent -> Analyzes Transcript + Full Chart + RAG Context.
-    6. Saves everything to DB.
+    1. Fetches Patient Data + Old Chart.
+    2. Runs Interview Processor -> Clean/Diarize the raw audio transcript.
+    3. Runs Scribe Agent -> Updates the Chart (HPI, MDM) based on cleaned dictation.
+    4. Runs Search Generator -> Summarizes case into objective clinical terms.
+    5. Runs RAG Search -> Fetches relevant docs using the summary.
+    6. Runs Advisor Agent -> Analyzes Transcript + Full Chart + RAG Context.
+    7. Saves everything to DB.
     """
     
     ER_STATUS[patient_id] = "Processing..."
@@ -49,15 +51,23 @@ async def process_er_audio_update(patient_id: int, transcript: str):
         scribe_prompt = settings.get("er_scribe_prompt", SCRIBE_SYSTEM_PROMPT)
         advisor_prompt = settings.get("er_advisor_prompt", ADVISOR_SYSTEM_PROMPT)
         search_gen_prompt = settings.get("er_search_prompt", ER_SEARCH_GENERATION_PROMPT)
+        interview_prompt = settings.get("er_interview_prompt", INTERVIEW_PROCESSOR_PROMPT)
         chart_template = settings.get("er_chart_template", DEFAULT_CHART_TEMPLATE)
 
-        # 3. SCRIBE: Construct Input & Run (FIRST)
+        # 3. INTERVIEW PROCESSING: Clean and Diarize (NEW STEP)
+        logger.info(f"Running Interview Processor for Patient {patient_id}...")
+        cleaned_transcript = await get_ai_response([
+            {"role": "system", "content": interview_prompt},
+            {"role": "user", "content": transcript}
+        ])
+        
+        # 4. SCRIBE: Construct Input & Run (Using CLEANED Transcript)
         scribe_user_msg = f"""
         Current Chart State:
         {current_chart if current_chart else "[New Patient]"}
 
         New Transcript/Update:
-        "{transcript}"
+        "{cleaned_transcript}"
 
         Task: Update the chart. Follow the template structure strictly.
         Template:
@@ -74,9 +84,8 @@ async def process_er_audio_update(patient_id: int, transcript: str):
         # Brief cooldown for Metal/GPU buffer
         await asyncio.sleep(0.5)
 
-        # 4. SEARCH GENERATION: Summarize the visit objectively
-        # We use the transcript AND the patient info to create a dense search query
-        search_context_msg = f"Patient: {patient.get('age_sex')} {patient.get('complaint')}\nTranscript: {transcript}"
+        # 5. SEARCH GENERATION: Summarize using CLEANED Transcript
+        search_context_msg = f"Patient: {patient.get('age_sex')} {patient.get('complaint')}\nTranscript: {cleaned_transcript}"
         
         logger.info("Generating Clinical Search Summary...")
         search_query_response = await get_ai_response([
@@ -88,13 +97,13 @@ async def process_er_audio_update(patient_id: int, transcript: str):
         search_query = search_query_response.strip().strip('"')
         logger.info(f"Generated RAG Query: {search_query}")
 
-        # 5. RAG SEARCH: Retrieve Clinical Context using the Summary
+        # 6. RAG SEARCH: Retrieve Clinical Context using the Summary
         # Search explicitly in the Medical folder
         rag_docs, _ = await perform_rag_query(search_query, STEWARD_MEDICAL_FOLDER)
         rag_context_str = "\n\n".join(rag_docs) if rag_docs else "No specific clinical guidelines found in library."
 
-        # 6. ADVISOR: Construct Input
-        # It sees: 1. Full Patient Context (Chart), 2. Specific New Dictation, 3. RAG Literature
+        # 7. ADVISOR: Construct Input
+        # It sees: 1. Full Patient Context (Chart), 2. Cleaned Dictation, 3. RAG Literature
         
         # Fallback to current_chart if scribe failed significantly (empty output)
         effective_chart = new_chart_content if new_chart_content and len(new_chart_content) > 20 else current_chart
@@ -102,8 +111,8 @@ async def process_er_audio_update(patient_id: int, transcript: str):
         advisor_user_msg = f"""
         Patient Info: {patient.get('age_sex', 'Unknown')} - {patient.get('complaint', 'Unknown')}
         
-        == LATEST DICTATION (New Data) ==
-        "{transcript}"
+        == LATEST UPDATE (Cleaned) ==
+        "{cleaned_transcript}"
         
         == FULL CHART CONTEXT (History) ==
         {effective_chart}
@@ -124,7 +133,9 @@ async def process_er_audio_update(patient_id: int, transcript: str):
             {"role": "user", "content": advisor_user_msg}
         ])
 
-        # 7. Save & Notify
+        # 8. Save & Notify
+        # We save the cleaned transcript history implicitly in the chart, 
+        # but you might want to save it explicitly later. For now, it drives the logic.
         await save_er_chart(patient_id, new_chart_content, advisor_analysis)
         ER_STATUS[patient_id] = "Ready"
         logger.info(f"ER Update Complete for {patient_id}")

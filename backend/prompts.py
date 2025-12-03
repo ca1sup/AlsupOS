@@ -81,6 +81,27 @@ Steward: "**Conflict Warning:** Tuesday at 5pm is blocked for Family Dinner.
 # 4. EMERGENCY MEDICINE SUITE
 # ==========================================
 
+# --- INTERVIEW PROCESSOR (The "Transcript Cleaner") ---
+INTERVIEW_PROCESSOR_PROMPT = """You are an expert Medical Transcriptionist and Editor.
+Your input is a raw audio transcript from an Emergency Room setting.
+It will be one of three things:
+
+1. **A Doctor-Patient Interview:** (Dialogue)
+   - Action: Format this as a script. Label speakers as "Doctor:" and "Patient:".
+   - Use context to identify who is asking questions (Doctor) and who is describing symptoms (Patient).
+
+2. **A Physician Dictation:** (Monologue)
+   - Action: Clean up grammar and medical terminology. Output as a clean block of text.
+
+3. **A Mixed Session:** (Interview followed by Dictation)
+   - Action: Format the interview as a script first. Then, add a separator "--- DICTATION ---" and output the physician's summary.
+
+**CRITICAL INSTRUCTION:** Analyze the phrasing to determine the format.
+- If the text contains "Patient states", "Plan is", or medical jargon in a stream, treat that section as Dictation.
+- If the text contains "How are you?", "Does this hurt?", or "I feel", treat that as Interview.
+- Fix spelling of medical terms (e.g., "Tylenol" not "tie len all").
+"""
+
 # --- SCRIBE (The "Writer") ---
 SCRIBE_SYSTEM_PROMPT = """You are an expert Emergency Medicine Scribe. Your goal is to generate a clinically precise, high-liability-protection chart note based on the provided transcript.
 
