@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { 
   Plus, LayoutDashboard, FolderOpen, Trash2,
-  Stethoscope, FileText, ChevronRight
+  Stethoscope, FileText, ChevronRight, MessageSquare
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import IngestModal from './IngestModal';
@@ -156,14 +156,23 @@ const Sidebar: React.FC<{ isOpen: boolean; setIsOpen: (o: boolean) => void }> = 
              Clinical Aid
            </button>
 
-           {/* Console/Settings Combined Link */}
-           <button 
-             onClick={() => navigate('/admin')} 
-             className="w-full flex items-center justify-center gap-2 p-3 text-xs font-bold uppercase tracking-wider text-txt-tertiary hover:text-txt-primary hover:bg-surface rounded-xl transition-all active:scale-95"
-           >
-             <LayoutDashboard className="w-5 h-5" />
-             Console & Settings
-           </button>
+           <div className="grid grid-cols-2 gap-2">
+               <button 
+                 onClick={() => { navigate('/'); if(window.innerWidth < 768) setIsOpen(false); }}
+                 className="flex items-center justify-center gap-2 p-3 text-xs font-bold uppercase tracking-wider text-txt-tertiary hover:text-txt-primary hover:bg-surface rounded-xl transition-all active:scale-95"
+               >
+                 <MessageSquare className="w-4 h-4" />
+                 Chat
+               </button>
+
+               <button 
+                 onClick={() => { navigate('/admin'); if(window.innerWidth < 768) setIsOpen(false); }}
+                 className="flex items-center justify-center gap-2 p-3 text-xs font-bold uppercase tracking-wider text-txt-tertiary hover:text-txt-primary hover:bg-surface rounded-xl transition-all active:scale-95"
+               >
+                 <LayoutDashboard className="w-4 h-4" />
+                 Console
+               </button>
+           </div>
         </div>
       </div>
 
