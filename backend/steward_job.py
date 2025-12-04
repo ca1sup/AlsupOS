@@ -17,6 +17,7 @@ from backend.database import (
 from backend.rag import get_ai_response
 from backend.apple_actions import get_recently_completed_reminders
 from backend.prompts import STEWARD_USER_PROMPT_TEMPLATE
+from backend.notifications import send_email
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,18 @@ async def run_daily_summary():
         # 5. Save
         await save_suggestion(response, response) 
         logger.info("Daily Summary Generated.")
+
+        # 6. Email Dispatch (ADDED)
+        if settings.get("module_email_enabled", "false") == "true":
+            # Prefer 'recipient_email_chris', fallback to sender
+            recipient = settings.get("recipient_email_chris") or settings.get("smtp_email")
+            if recipient:
+                subject = f"Daily Briefing | {current_date_str}"
+                logger.info(f"📧 Queueing briefing email to {recipient}...")
+                # Note: This is now a non-blocking async call
+                await send_email(subject, response, recipient)
+            else:
+                logger.warning("Daily Briefing skipped: Email module enabled but no recipient configured.")
 
     except Exception as e:
         logger.error(f"Daily Summary Failed: {e}", exc_info=True)

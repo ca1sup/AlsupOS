@@ -10,18 +10,17 @@ from typing import List, Dict, Tuple, Any, Optional
 from pathlib import Path
 
 # === CRITICAL SAFETY CONFIGURATION ===
-# Even with the downgrade, these settings ensure maximum stability
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["ALLOW_RESET"] = "True"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
-# FIX: Disable HuggingFace progress bars to prevent TQDM threading crashes on macOS
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 # FIX: Import Settings for robust client configuration
 from chromadb import PersistentClient, Collection
 from chromadb.config import Settings
 from sentence_transformers import CrossEncoder, SentenceTransformer
+import torch # Imported for device checking
 
 try:
     import mlx.core as mx
@@ -86,23 +85,19 @@ WHOOSH_SCHEMA = Schema(
 
 class WorkerModel:
     def __init__(self):
-        # FIX: Force CPU to avoid macOS MPS Rust Panics
-        logger.info(f"Loading {EMBEDDING_MODEL_NAME} (CPU Enforced for Stability)")
+        # FIX: Force CPU to avoid macOS MPS Rust Panics for Embeddings (Thread safety)
+        # Note: Ingest uses a different WorkerModel optimized for MPS. This one is for queries.
+        logger.info(f"Loading {EMBEDDING_MODEL_NAME} (CPU Enforced for Query Stability)")
         self.model = SentenceTransformer(EMBEDDING_MODEL_NAME, device='cpu', trust_remote_code=True)
-        self.model.max_seq_length = 2048
+        # Match Qwen safety limit
+        self.model.max_seq_length = 8192
 
     def encode(self, texts: List[str]) -> np.ndarray:
         if isinstance(texts, str): texts = [texts]
         if not texts: return np.array([])
         
-        prefix = ""
-        if "nomic" in EMBEDDING_MODEL_NAME:
-            prefix = "search_query: "
-        
-        texts_with_prefix = [prefix + t for t in texts]
-        
         embeddings = self.model.encode(
-            texts_with_prefix,
+            texts,
             batch_size=len(texts),
             normalize_embeddings=True,
             show_progress_bar=False,
@@ -122,13 +117,11 @@ async def init_llm():
     if not HAS_MLX: return
 
     # 1. Determine which model to load
-    #    Priority: Setting > Config Default
     target_model_name = get_setting("llm_model")
     if not target_model_name:
         target_model_name = DEFAULT_MLX_MODEL
     
     # 2. Resolve Path
-    #    Check if it exists locally in MODELS_DIR, otherwise treat as HF Repo ID
     local_model_path = MODELS_DIR / target_model_name
     
     if local_model_path.exists():
@@ -152,7 +145,6 @@ async def init_llm():
                 logger.info(f"✅ MLX Model '{target_model_name}' Loaded Successfully.")
             except Exception as e:
                 logger.error(f"❌ Failed to load MLX model '{target_model_name}': {e}")
-                # Don't raise, just log, so server stays alive (chat will fail gracefully)
 
 async def reload_llm():
     """Unloads the current LLM and initializes the new one based on settings."""
@@ -160,14 +152,11 @@ async def reload_llm():
     
     logger.info("♻️  Reloading LLM...")
     async with g_llm_lock:
-        # Force unload
         g_llm_model = None
         g_llm_tokenizer = None
-        # Optional: Trigger garbage collection if memory is tight
         import gc
         gc.collect()
         
-    # Re-initialize (this will pick up the new setting)
     await init_llm()
 
 async def get_embedding_model():
@@ -200,15 +189,13 @@ async def get_chroma_client(force_reload: bool = False) -> Optional[PersistentCl
 
         CHROMA_PATH.mkdir(parents=True, exist_ok=True)
         
-        # FIX: Remove 'is_persistent=True' for v0.4.24 compatibility
         client_settings = Settings(
             allow_reset=True,
             anonymized_telemetry=False
         )
 
         try:
-            logger.info(f"📁 Opening ChromaDB at: {CHROMA_PATH}")
-            # Initialize directly (v0.4.24 is thread-safe on Mac)
+            # Initialize directly
             g_chroma_client = PersistentClient(path=str(CHROMA_PATH), settings=client_settings)
             
             # Simple heartbeat check
@@ -245,12 +232,29 @@ async def get_reranker():
     global g_reranker
     if get_setting("reranking_enabled") == "false": return None
     if g_reranker: return g_reranker
+    
     async with g_reranker_lock:
         if g_reranker is None:
             try: 
                 model_name = get_setting("reranker_model") or DEFAULT_RERANKER_MODEL
-                g_reranker = await asyncio.to_thread(CrossEncoder, model_name, model_kwargs={"cache_dir": str(MODELS_DIR)})
-            except: g_reranker = None
+                
+                # Determine Hardware Acceleration
+                device = "cpu"
+                if torch.backends.mps.is_available():
+                    device = "mps"
+                    logger.info(f"🚀 Reranker using GPU (MPS)")
+                
+                # Load CrossEncoder with specific device
+                g_reranker = await asyncio.to_thread(
+                    CrossEncoder, 
+                    model_name, 
+                    device=device,
+                    trust_remote_code=True,
+                    model_kwargs={"cache_dir": str(MODELS_DIR)}
+                )
+            except Exception as e: 
+                logger.error(f"Failed to load reranker: {e}")
+                g_reranker = None
     return g_reranker
 
 def reciprocal_rank_fusion(results_list: List[List[Tuple[str, Any]]], k: int = RRF_K_CONSTANT) -> Dict[str, float]:
@@ -318,6 +322,7 @@ async def resolve_collection_names(folder_name: str, client: PersistentClient, a
 async def search_file(collection_name: str, filename: str | List[str], query: str, k: int = 5) -> Tuple[List[str], List[Dict[str, Any]]]:
     logger.info(f"🔍 RAG Search: '{query}' in Folder='{collection_name}', File='{filename}'")
     
+    # 1. Embed Query
     embed_model = await get_embedding_model()
     embeddings_array = await asyncio.to_thread(embed_model.encode, query)
     query_emb = embeddings_array[0].tolist()
@@ -338,20 +343,22 @@ async def search_file(collection_name: str, filename: str | List[str], query: st
         v_results, d_map = [], {}
         where_clause = {"filename": target_filename} if target_filename and target_filename != "all" else None
         
+        # Increase initial vector fetch to allow reranker to work its magic
+        # If user requests K=20, we fetch K*5 = 100 candidates from vectors
+        fetch_k = k * 5
+        
         for col in cols:
             try:
-                # logger.debug(f"   ... Querying {col.name} ...")
                 res = await asyncio.to_thread(
                     col.query, 
                     query_embeddings=[query_emb], 
-                    n_results=k*5, 
+                    n_results=fetch_k, 
                     where=where_clause, 
                     include=["documents", "metadatas"]
                 )
                 if res['ids'] and len(res['ids']) > 0:
                     count = len(res['ids'][0])
                     for i in range(count):
-                        # FIX: Use Unique Chunk ID (Chroma ID) instead of Metadata Doc ID to prevent collisions
                         unique_id = res['ids'][0][i]
                         meta = res['metadatas'][0][i]
                         doc_text = res['documents'][0][i]
@@ -368,6 +375,7 @@ async def search_file(collection_name: str, filename: str | List[str], query: st
         logger.info(f"⚠️ No results in file '{filename}'. Falling back to entire folder '{collection_name}'...")
         vector_results, doc_map = await run_vector_search("all")
 
+    # 2. Keyword Search (Whoosh)
     ix = get_whoosh_index()
     keyword_results = []
     
@@ -390,23 +398,24 @@ async def search_file(collection_name: str, filename: str | List[str], query: st
 
     logger.info(f"📊 Stats: Vector Hits={len(vector_results)}, Keyword Hits={len(keyword_results)}")
 
+    # 3. Hybrid Fusion
     fused = reciprocal_rank_fusion([vector_results, keyword_results])
     sorted_res = sorted(fused.items(), key=lambda x: x[1], reverse=True)
     
-    # --- RERANKING LOGIC ---
+    # 4. Reranking
     reranker = await get_reranker()
     final_docs, final_metas, seen = [], [], set()
-    top_n_limit = int(get_setting("reranker_top_n") or 50)
+    top_n_limit = int(get_setting("reranker_top_n") or 100)
     top_n = sorted_res[:top_n_limit]
 
-    # Normalize to format: [(score, did), ...]
     if reranker:
         cands = [(doc_map[did][0], did) for did, _ in top_n if did in doc_map]
         if cands:
+            # Rerank with GPU acceleration if enabled
             scores = await asyncio.to_thread(reranker.predict, [[query, c[0]] for c in cands])
+            # Re-sort based on new scores
             top_n = sorted(zip(scores, [c[1] for c in cands]), key=lambda x: x[0], reverse=True)
     else:
-        # BUG FIX: If no reranker, swap the tuple order to match
         top_n = [(score, did) for did, score in top_n]
 
     for _, did in top_n:
@@ -421,7 +430,7 @@ async def search_file(collection_name: str, filename: str | List[str], query: st
     return final_docs, final_metas
 
 async def perform_rag_query(query: str, folder: str, file: Optional[str] = None) -> Tuple[List[str], List[Dict[str, Any]]]:
-    k = int(get_setting("default_search_k") or 5)
+    k = int(get_setting("default_search_k") or 20)
     try:
         docs, metas = await search_file(folder, filename=file or "all", query=query, k=k)
         return docs, metas

@@ -96,6 +96,7 @@ from backend.config import (
     STEWARD_HEALTH_FOLDER,
     STEWARD_WORKOUT_FOLDER,
     STEWARD_NUTRITION_FOLDER,
+    STEWARD_MEDICAL_FOLDER,
     BACKUP_PATH, LOGS_PATH,
     MEDICAL_SPEECH_PROMPT,
     MODELS_DIR,          
@@ -109,6 +110,7 @@ from backend.rag import (
     check_ollama_status
 )
 from backend.rag import load_settings as load_rag_settings
+from backend.prompts import ATTENDING_CONSULT_PROMPT
 
 from backend.database import (
     get_db_connection,
@@ -739,7 +741,7 @@ async def api_audio_briefing(background_tasks: BackgroundTasks):
     path = await generate_audio_briefing(text)
     if not path: raise HTTPException(500, "TTS Failed")
     background_tasks.add_task(os.remove, path)
-    return FileResponse(path, media_type="audio/mpeg", filename="briefing.mp3")
+    return FileResponse(path, media_type="audio/wav", filename="briefing.wav")
 
 class TTSPayload(BaseModel): text: str
 @app.post("/api/tts")
@@ -747,7 +749,7 @@ async def api_generate_tts(p: TTSPayload, background_tasks: BackgroundTasks):
     path = await generate_audio_briefing(p.text)
     if not path: raise HTTPException(status_code=500, detail="TTS generation failed.")
     background_tasks.add_task(os.remove, path)
-    return FileResponse(path, media_type="audio/mpeg", filename="speech.mp3")
+    return FileResponse(path, media_type="audio/wav", filename="speech.wav")
 
 class DraftPayload(BaseModel): to: str; subject: str; body: str
 @app.post("/api/steward/email-draft")
@@ -800,6 +802,84 @@ async def ws_audio(ws: WebSocket):
     except Exception: pass
     finally:
         if temp_audio_path.exists(): os.remove(temp_audio_path)
+
+@app.websocket("/ws/clinical_consult/{patient_id}")
+async def ws_clinical_consult(ws: WebSocket, patient_id: int):
+    """
+    Dedicated WebSocket for discussing a specific patient with RAG support.
+    """
+    await ws.accept()
+    try:
+        while True:
+            # 1. Receive User Query
+            user_msg = await ws.receive_text()
+            
+            # 2. Fetch Patient Context (Live)
+            patient = await get_er_patient_data(patient_id)
+            if not patient:
+                await ws.send_text("Error: Patient not found.")
+                continue
+
+            # Construct Transcript from history list
+            transcript_history = patient.get("dictation_history", [])
+            transcript_str = "\n".join([f"- {t}" for t in transcript_history]) if transcript_history else "No transcript available."
+            
+            # Construct Chart
+            chart_str = patient.get("chart_content", "No chart content.")
+
+            # 3. Construct Context Prompt
+            full_context = f"""
+            === PATIENT CONTEXT ===
+            ID: {patient_id}
+            Room: {patient.get('room', 'Unknown')}
+            Age/Sex: {patient.get('age_sex', 'Unknown')}
+            Complaint: {patient.get('complaint', 'Unknown')}
+
+            === CHART ===
+            {chart_str}
+
+            === TRANSCRIPT HISTORY ===
+            {transcript_str}
+            """
+
+            # 4. Stream Response with "Attending" persona and RAG enabled
+            # We explicitly force the "Emergency Medicine" folder for RAG search scope
+            async with MLX_LOCK:
+                full_resp = ""
+                collected_sources = []
+                
+                # Stream generator
+                async for token in agent_stream(
+                    query=user_msg,
+                    session_id=0, # Ephemeral session
+                    persona="Clinical", # Use Clinical logic/persona
+                    folder=STEWARD_MEDICAL_FOLDER, # Force EM RAG scope
+                    file=None,
+                    history=[{"role": "system", "content": ATTENDING_CONSULT_PROMPT + "\n" + full_context}]
+                ):
+                    if isinstance(token, dict) and token.get("type") == "sources":
+                        # Send sources to UI immediately
+                        await ws.send_json(token)
+                        collected_sources = token.get("data", [])
+                    else:
+                        # Send text token
+                        await ws.send_json({"type": "token", "data": token})
+                        full_resp += token
+                
+                # Append sources XML if any were found (consistency with main chat)
+                if collected_sources:
+                    try:
+                        src_str = json.dumps(collected_sources)
+                        # We don't need to append to text stream for UI, 
+                        # but if we were saving history, we would.
+                    except: pass
+
+                await ws.send_json({"type": "done"})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"Consult WS Error: {e}", exc_info=True)
 
 @app.websocket("/ws")
 async def ws_rag(ws: WebSocket):

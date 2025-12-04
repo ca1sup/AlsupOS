@@ -29,10 +29,10 @@ const AdminView: React.FC = () => {
   ];
 
   return (
-    <div className="min-h-screen bg-void flex flex-col md:flex-row text-txt-primary font-sans selection:bg-accent/20">
+    <div className="fixed inset-0 w-full h-[100dvh] bg-void flex flex-col md:flex-row text-txt-primary font-sans selection:bg-accent/20 overflow-hidden">
       
       {/* Mobile Header */}
-      <div className="md:hidden p-4 border-b border-border-invisible bg-void/80 backdrop-blur-xl flex items-center justify-between sticky top-0 z-40">
+      <div className="md:hidden p-4 border-b border-border-invisible bg-void/80 backdrop-blur-xl flex items-center justify-between sticky top-0 z-40 shrink-0">
         <button 
           onClick={() => setIsSidebarOpen(true)}
           className="p-2 -ml-2 hover:bg-surface rounded-lg text-txt-secondary hover:text-txt-primary transition-colors"
@@ -87,8 +87,8 @@ const AdminView: React.FC = () => {
         </nav>
       </aside>
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-y-auto bg-void h-[calc(100vh-65px)] md:h-screen custom-scrollbar">
+      {/* Main Content - Added touch-pan-y and overscroll-y-none */}
+      <main className="flex-1 overflow-y-auto bg-void h-full custom-scrollbar overscroll-y-none touch-pan-y relative">
          <div className="max-w-7xl mx-auto p-6 md:p-12 pb-32">
             <Routes>
               <Route path="/" element={<Dashboard />} />

@@ -275,9 +275,32 @@ async def generate_audio_briefing(text: str) -> str:
                 if audio_data.size == 0:
                     raise ValueError("Final audio data is empty")
                 
-                # 5. Write
-                logger.info(f"🟣 Writing to {path}: shape={audio_data.shape}, sr={sample_rate}")
-                sf.write(path, audio_data, sample_rate)
+                # --- NEW CODE START ---
+                # 5. Check Volume & Amplify
+                max_val = np.max(np.abs(audio_data))
+                logger.info(f"📊 Audio Max Amplitude: {max_val:.6f}")
+
+                if max_val == 0:
+                    logger.warning("⚠️ Generated audio is PURE SILENCE (all zeros). Check model/text inputs.")
+                else:
+                    # Normalize to ~90% max volume (Amplifies quiet audio, reduces loud audio)
+                    target_amp = 0.9
+                    scale_factor = target_amp / max_val
+                    audio_data = audio_data * scale_factor
+                    logger.info(f"🔊 Normalized audio volume by factor: {scale_factor:.2f}")
+
+                # 6. Convert Float32 to Int16 (Mobile Compatible)
+                audio_data = (audio_data * 32767).astype(np.int16)
+                # --- NEW: FORCE STEREO FOR SAFARI ---
+                # Safari often fails with Mono 24kHz. We duplicate the mono track to 2 channels.
+                if len(audio_data.shape) == 1:
+                    # Stack it into [N, 2] shape
+                    audio_data = np.column_stack((audio_data, audio_data))
+                    logger.info("🎧 Converted Mono -> Stereo for Safari compatibility")
+                # 7. Write with EXPLICIT Format
+                # FORCE standard WAV PCM format
+                sf.write(path, audio_data, sample_rate, format='WAV', subtype='PCM_16')
+                # --- NEW CODE END --- 
                 logger.info(f"✅ Successfully wrote audio file")
 
             except Exception as e:

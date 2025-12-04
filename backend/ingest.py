@@ -43,11 +43,11 @@ from backend.config import (
 
 # --- PERFORMANCE TUNING (M1 Ultra Optimized) ---
 # Utilizing 64GB Unified Memory & 64-Core GPU
-EMBEDDING_BATCH_SIZE = 16
+EMBEDDING_BATCH_SIZE = 2
 WRITER_QUEUE_SIZE = 100
 
 # Match physical core count (20 Cores) for file processing
-MAX_WORKERS = 18
+MAX_WORKERS = 8
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -161,7 +161,8 @@ class WorkerModel:
             device=self.device, 
             trust_remote_code=True
         )
-        self.model.max_seq_length = 2048
+        # Safe limit for Qwen (supports 32k, but we stick to 8k for sanity)
+        self.model.max_seq_length = 8192
         
         # JIT compile warmup
         self.model.encode(["warmup"], convert_to_numpy=True)
@@ -169,22 +170,20 @@ class WorkerModel:
     def encode_batch(self, texts: List[str]) -> List[List[float]]:
         if not texts: return []
         
-        max_chars = 6000
+        # Qwen supports up to 32k tokens, so we barely need to truncate.
+        # Just a sanity limit to prevent OOM on truly massive anomalies.
+        max_chars = 12000 
         texts = [t[:max_chars] for t in texts]
         
-        if "nomic" in EMBEDDING_MODEL_NAME:
-            prefix = "search_document: "
-        else:
-            prefix = ""
-            
-        texts_with_prefix = [prefix + t for t in texts]
+        # Qwen usually works best without special prefixes for retrieval unless specified
+        # Standard usage is direct text.
         
         try:
             # CRITICAL FIX: Serialize GPU access to prevent MPS contention/crashes
             # while keeping text processing parallel
             with self.lock:
                 embeddings = self.model.encode(
-                    texts_with_prefix,
+                    texts,
                     batch_size=EMBEDDING_BATCH_SIZE, 
                     normalize_embeddings=True,
                     show_progress_bar=False,
@@ -228,7 +227,9 @@ def process_file_task(task: IngestTask, model_instance: WorkerModel) -> Tuple[Fi
 
         headers = [("#", "H1"), ("##", "H2"), ("###", "H3")]
         parent_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers, strip_headers=False)
-        child_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=150)
+        
+        # Qwen Optimization: Larger chunks (2000 chars) because it can handle the context.
+        child_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
         
         fname = task.file_path.name
         parents = parent_splitter.split_text(text_content)
@@ -267,6 +268,11 @@ def process_file_task(task: IngestTask, model_instance: WorkerModel) -> Tuple[Fi
         if chunk_texts:
             # Calls the shared model (which handles locking internally)
             vectors = model_instance.encode_batch(chunk_texts)
+            
+            # Check if vectors were actually returned
+            if not vectors or len(vectors) != len(chunk_texts):
+                 return FileResult(task.file_path, task.collection, current_hash, current_mtime, [], error="Encoding Failed"), None
+
             write_task = WriteTask(vectors, chunk_texts, metas, ids, task.collection, doc_tracking)
             
             # Explicitly clear memory

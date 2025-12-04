@@ -1,3 +1,4 @@
+# backend/config.py
 import os
 import re
 from pathlib import Path
@@ -38,9 +39,13 @@ STEWARD_WORSHIP_FOLDER = "Family Worship"
 STEWARD_CURRICULUM_FOLDER = "Curriculum"
 
 # === MODEL SETTINGS ===
-DEFAULT_MLX_MODEL = "mlx-community/Phi-4-mini-instruct-8bit"
-DEFAULT_RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-EMBEDDING_MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
+DEFAULT_MLX_MODEL = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-6bit"
+
+# UPDATED: High-Fidelity Reranker (Matches Qwen Embedding quality)
+DEFAULT_RERANKER_MODEL = "mixedbread-ai/mxbai-rerank-large-v1"
+
+# UPDATED: Qwen3 Embedding (0.6B Params, 32k Context)
+EMBEDDING_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
 
 # --- VOICE MODELS ---
 # STT: Optimized for Mac/MLX (High Accuracy)
@@ -65,13 +70,14 @@ MEDICAL_SPEECH_PROMPT = (
 )
 
 # === SYSTEM SETTINGS ===
-# Increased to 50MB to support longer patient interview recordings
 UPLOAD_CHUNK_SIZE = 1024 * 1024 * 50  
 WS_RECEIVE_TIMEOUT = 300.0       
 WS_HEARTBEAT_INTERVAL = 30.0     
-DEFAULT_SEARCH_K = 5             
-RERANK_TOP_N = 50                
-HYBRID_SEARCH_K_MULTIPLIER = 1.5 
+
+# UPDATED: Increased Search Depth for M1 Ultra
+DEFAULT_SEARCH_K = 20            # Fetch 20 docs instead of 5
+RERANK_TOP_N = 100               # Re-sort top 100 candidates
+HYBRID_SEARCH_K_MULTIPLIER = 2.0 
 EMBEDDING_BATCH_SIZE = 50
 
 # === SUPPORTED FILE TYPES ===

@@ -6,9 +6,10 @@ import {
     Plus, X, Activity, Globe, Archive, ChevronLeft,
     AlertTriangle, Brain, Stethoscope, Pill, ArrowRightCircle, 
     Mic, StopCircle, FileText, RefreshCw, Menu, CheckCircle,
-    Trash2, Sparkles
+    Trash2, Sparkles, MessageSquare
 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import ConsultModal from '../components/ConsultModal';
 
 // --- INTERFACES ---
 interface CriticalAlert {
@@ -90,6 +91,9 @@ export default function ClinicalView() {
   const [loading, setLoading] = useState(false);
   const [showNewPatientModal, setShowNewPatientModal] = useState(false);
   const [showSourcesModal, setShowSourcesModal] = useState(false);
+  
+  // Consult Modal State
+  const [isConsultOpen, setIsConsultOpen] = useState(false);
   
   // Recording State
   const [isRecording, setIsRecording] = useState(false);
@@ -341,21 +345,32 @@ export default function ClinicalView() {
                             </div>
                             
                             <div className="flex items-center gap-2 shrink-0">
-                                {!isRecording ? (
-                                    <button 
-                                        onClick={() => startRecording(activePatient.id)}
-                                        className="flex items-center gap-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white px-3 py-2 rounded-xl font-bold text-xs transition-all border border-red-500/20 active:scale-95"
-                                    >
-                                        <Mic size={16} /> <span className="hidden sm:inline">DICTATE</span>
-                                    </button>
-                                ) : (
-                                    <button 
-                                        onClick={stopRecording}
-                                        className="flex items-center gap-2 bg-red-500 text-white px-3 py-2 rounded-xl font-bold text-xs animate-pulse transition-all shadow-glow-red active:scale-95"
-                                    >
-                                        <StopCircle size={16} /> <span className="hidden sm:inline">STOP</span>
-                                    </button>
-                                )}
+                                {/* CONSULT BUTTON - Bigger & spaced */}
+                                <button 
+                                    onClick={() => setIsConsultOpen(true)}
+                                    className="flex items-center gap-2 bg-purple-500/10 text-purple-400 hover:bg-purple-500 hover:text-white px-5 py-3 rounded-xl font-bold text-sm transition-all border border-purple-500/20 active:scale-95 shadow-sm"
+                                >
+                                    <MessageSquare size={18} /> <span className="hidden sm:inline">CONSULT ATTENDING</span>
+                                </button>
+
+                                {/* DICTATE BUTTON - Bigger, spaced, margin-left applied */}
+                                <div className="ml-4">
+                                    {!isRecording ? (
+                                        <button 
+                                            onClick={() => startRecording(activePatient.id)}
+                                            className="flex items-center gap-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white px-5 py-3 rounded-xl font-bold text-sm transition-all border border-red-500/20 active:scale-95 shadow-sm"
+                                        >
+                                            <Mic size={18} /> <span className="hidden sm:inline">DICTATE</span>
+                                        </button>
+                                    ) : (
+                                        <button 
+                                            onClick={stopRecording}
+                                            className="flex items-center gap-2 bg-red-500 text-white px-5 py-3 rounded-xl font-bold text-sm animate-pulse transition-all shadow-glow-red active:scale-95 shadow-sm"
+                                        >
+                                            <StopCircle size={18} /> <span className="hidden sm:inline">STOP</span>
+                                        </button>
+                                    )}
+                                </div>
                             </div>
                         </div>
 
@@ -553,6 +568,13 @@ export default function ClinicalView() {
 
         {/* --- MODALS --- */}
         
+        <ConsultModal 
+            isOpen={isConsultOpen}
+            onClose={() => setIsConsultOpen(false)}
+            patientId={activePatientId}
+            roomNumber={activePatient?.room_label || 'Unknown'}
+        />
+
         {/* New Patient Modal */}
         {showNewPatientModal && (
             <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
