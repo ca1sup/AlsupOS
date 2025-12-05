@@ -41,14 +41,14 @@ interface Treatment {
 }
 
 interface DispositionGuidance {
-  recommendation: 'ADMIT' | 'OBSERVATION' | 'DISCHARGE';
+  recommendation: 'ADMIT' | 'DISCHARGE';
   reasoning: string;
 }
 
 interface ClinicalGuidance {
     critical_alerts?: CriticalAlert[];
     differential_diagnosis?: Differential[];
-    suggested_workup?: DiagnosticTest[];
+    diagnostic_plan?: DiagnosticTest[]; // RENAMED from suggested_workup to match backend
     recommended_treatments?: Treatment[];
     disposition_guidance?: DispositionGuidance;
 }
@@ -510,19 +510,39 @@ export default function ClinicalView() {
                                             })}
                                         </div>
 
-                                        {/* 3. Plan */}
+                                        {/* 3. Diagnostic Plan (Renamed & Enhanced) */}
                                         <div className="space-y-2">
-                                            <h4 className="text-[10px] font-bold text-txt-tertiary uppercase ml-1 tracking-widest">Suggested Plan</h4>
+                                            <h4 className="text-[10px] font-bold text-txt-tertiary uppercase ml-1 tracking-widest">Diagnostic Plan</h4>
                                             <div className="bg-surface border border-white/5 rounded-xl overflow-hidden shadow-sm">
-                                                {guidance.suggested_workup?.map((test: DiagnosticTest, i: number) => (
-                                                    <div key={i} className="p-3 border-b border-white/5 last:border-0 flex items-start gap-3">
-                                                        <Stethoscope size={14} className="text-blue-400 mt-0.5 shrink-0" />
-                                                        <div>
-                                                            <div className="text-sm font-medium text-txt-primary leading-tight">{test.test}</div>
-                                                            <div className="text-xs text-txt-tertiary mt-0.5 leading-snug opacity-80">{test.rationale}</div>
+                                                {/* Use diagnostic_plan from schema */}
+                                                {guidance.diagnostic_plan?.map((test: DiagnosticTest, i: number) => {
+                                                    // Determine badge color based on priority
+                                                    const priorityColor = 
+                                                        test.priority === 'IMMEDIATE' ? 'bg-red-500/20 text-red-400 border-red-500/10' :
+                                                        test.priority === 'URGENT' ? 'bg-orange-500/20 text-orange-400 border-orange-500/10' :
+                                                        'bg-blue-500/10 text-blue-400 border-blue-500/10';
+
+                                                    return (
+                                                        <div key={i} className="p-3 border-b border-white/5 last:border-0 flex items-start gap-3">
+                                                            <Stethoscope size={14} className="text-blue-400 mt-0.5 shrink-0" />
+                                                            <div className="w-full">
+                                                                <div className="flex justify-between items-start">
+                                                                    <div className="text-sm font-medium text-txt-primary leading-tight">{test.test}</div>
+                                                                    {test.priority && (
+                                                                        <span className={cn("text-[9px] font-bold px-1.5 py-0.5 rounded border ml-2", priorityColor)}>
+                                                                            {test.priority}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="text-xs text-txt-tertiary mt-1 leading-snug opacity-90 border-l-2 border-white/10 pl-2">
+                                                                    {test.rationale}
+                                                                </div>
+                                                            </div>
                                                         </div>
-                                                    </div>
-                                                ))}
+                                                    );
+                                                })}
+                                                
+                                                {/* Fallback for Treatments inside the plan if desired, but they are usually separate */}
                                                  {guidance.recommended_treatments?.map((tx: Treatment, i: number) => (
                                                     <div key={i} className="p-3 border-b border-white/5 last:border-0 flex items-start gap-3 bg-emerald-500/5">
                                                         <Pill size={14} className="text-emerald-400 mt-0.5 shrink-0" />

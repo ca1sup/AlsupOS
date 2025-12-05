@@ -18,6 +18,7 @@ from backend.rag import get_ai_response
 from backend.apple_actions import get_recently_completed_reminders
 from backend.prompts import STEWARD_USER_PROMPT_TEMPLATE
 from backend.notifications import send_email
+from backend.weather import get_current_weather
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,9 @@ async def run_daily_summary():
         # 1. Gather Definite Context
         current_date_str = datetime.now().strftime("%A, %B %d")
         
+        # Weather
+        weather_str = await get_current_weather()
+        
         todays_events_str = await get_todays_events()
         weeks_events = await get_weeks_events_structured()
         weeks_str = "\n".join([f"- {e['title']} ({e['start_time']})" for e in weeks_events])
@@ -63,9 +67,9 @@ async def run_daily_summary():
         facts_str = "\n".join([f"- {f}" for f in facts])
 
         # 2. Definite Data Dictionary
-        # We manually construct 'all_context' here so the DB template can use it.
         context_data = {
             "current_date": current_date_str,
+            "weather_summary": weather_str,
             "todays_events": todays_events_str,
             "weeks_events": weeks_str,
             "tasks": tasks_str,
@@ -74,9 +78,10 @@ async def run_daily_summary():
             "health_summary": health_str,
             "family_context": facts_str,
             
-            # OPTION 1 FIX: Create the aggregate variable
+            # Aggregate variable for custom templates
             "all_context": f"""
             --- AGGREGATED CONTEXT ---
+            WEATHER: {weather_str}
             CALENDAR: {todays_events_str}
             TASKS: {tasks_str}
             HEALTH: {health_str}
@@ -90,7 +95,6 @@ async def run_daily_summary():
         
         if db_template:
             try:
-                # This should now succeed even if it uses {all_context}
                 prompt = db_template.format(**context_data)
             except KeyError as e:
                 logger.warning(f"⚠️ Custom/DB template failed: {e}. Falling back to default.")
@@ -108,14 +112,12 @@ async def run_daily_summary():
         await save_suggestion(response, response) 
         logger.info("Daily Summary Generated.")
 
-        # 6. Email Dispatch (ADDED)
+        # 6. Email Dispatch
         if settings.get("module_email_enabled", "false") == "true":
-            # Prefer 'recipient_email_chris', fallback to sender
             recipient = settings.get("recipient_email_chris") or settings.get("smtp_email")
             if recipient:
                 subject = f"Daily Briefing | {current_date_str}"
                 logger.info(f"📧 Queueing briefing email to {recipient}...")
-                # Note: This is now a non-blocking async call
                 await send_email(subject, response, recipient)
             else:
                 logger.warning("Daily Briefing skipped: Email module enabled but no recipient configured.")

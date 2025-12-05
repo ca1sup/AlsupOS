@@ -50,6 +50,9 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
+# Set Hugging Face Home to local models dir to avoid cache argument conflicts
+os.environ["HF_HOME"] = str(MODELS_DIR)
+
 RRF_K_CONSTANT = 60
 
 # === GLOBAL STATE ===
@@ -244,13 +247,16 @@ async def get_reranker():
                     device = "mps"
                     logger.info(f"🚀 Reranker using GPU (MPS)")
                 
-                # Load CrossEncoder with specific device
+                # Load CrossEncoder
+                # FIX: Removed 'cache_dir' argument to avoid "multiple values" error.
+                # We now rely on os.environ["HF_HOME"] = MODELS_DIR set at the top of this file.
                 g_reranker = await asyncio.to_thread(
                     CrossEncoder, 
                     model_name, 
                     device=device,
                     trust_remote_code=True,
-                    model_kwargs={"cache_dir": str(MODELS_DIR)}
+                    # We pass an empty dict to satisfy the warning about model_kwargs
+                    model_kwargs={} 
                 )
             except Exception as e: 
                 logger.error(f"Failed to load reranker: {e}")

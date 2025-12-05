@@ -80,7 +80,7 @@ def get_recently_completed_reminders():
     end tell
     '''
     # We allow a slightly longer timeout for fetching lists
-    res = _run_applescript(script, timeout=15)
+    res = _run_applescript(script, timeout=30)
     return res.splitlines() if res else []
 
 async def run_apple_reminders_sync():
@@ -120,7 +120,8 @@ async def run_apple_reminders_sync():
     end tell
     '''
     
-    raw_output = await asyncio.to_thread(_run_applescript, script, 30)
+    # INCREASED TIMEOUT to 120s to fix "AppleScript timed out" error
+    raw_output = await asyncio.to_thread(_run_applescript, script, 120)
     if not raw_output: return
 
     async with get_db_connection() as conn:

@@ -5,6 +5,7 @@ import imaplib
 import email
 import json
 import re
+import aiofiles
 from email.header import decode_header
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +19,7 @@ if str(BASE_DIR) not in sys.path:
 # --- End HACK ---
 
 from backend.database import get_all_settings, init_db, get_db_connection
-from backend.config import DB_STEWARD_PATH 
+from backend.config import DB_STEWARD_PATH, DOCS_PATH, STEWARD_WORSHIP_FOLDER
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,29 @@ def _parse_text_sleep_data(payload: str) -> Optional[Dict[str, Any]]:
         
         return data if "sleep_total_duration" in data or "sleep_in_bed_duration" in data else None
     except: return None
+
+def _parse_worship_email(payload: str) -> Optional[str]:
+    """
+    Parses 'First Things' or Liturgy details from Pastor Tim's email.
+    """
+    try:
+        # Simple extraction logic: Look for "First Things" or common liturgy markers
+        # This can be refined based on the exact email format
+        if "First Things" in payload or "Order of Worship" in payload:
+            return payload
+        return None
+    except: return None
+
+async def _save_worship_log(content: str):
+    try:
+        path = DOCS_PATH / STEWARD_WORSHIP_FOLDER
+        path.mkdir(parents=True, exist_ok=True)
+        filename = f"worship_guide_{datetime.now().strftime('%Y-%m-%d')}.txt"
+        async with aiofiles.open(path / filename, "w", encoding="utf-8") as f:
+            await f.write(content)
+        logger.info(f"Saved worship guide: {filename}")
+    except Exception as e:
+        logger.error(f"Failed to save worship log: {e}")
 
 async def _write_health_data_to_db(parsed_data_with_ids: List[Tuple[Dict[str, Any], str]]) -> List[str]:
     """
@@ -109,62 +133,89 @@ async def run_email_ingest():
             return
 
         # Fetch and Parse (Sync Thread)
-        # Returns: [(health_data_dict, email_id), ...]
-        parsed_data_with_ids = await asyncio.to_thread(
+        # Returns: Tuple of (health_data_list, worship_content_list)
+        health_payloads, worship_payloads, processed_ids = await asyncio.to_thread(
             _process_emails_thread, server, email_addr, password, 
             settings.get("imap_subject_filter"), settings.get("imap_subject_filter_sleep")
         )
         
-        # Write to DB
-        success_ids = await _write_health_data_to_db(parsed_data_with_ids)
+        # 1. Write Health to DB
+        success_health_ids = await _write_health_data_to_db(health_payloads)
         
-        # Mark Successful as Seen (Sync Thread)
-        if success_ids:
-            await asyncio.to_thread(_mark_emails_as_seen, server, email_addr, password, success_ids)
+        # 2. Save Worship to File
+        success_worship_ids = []
+        for content, eid in worship_payloads:
+            await _save_worship_log(content)
+            success_worship_ids.append(eid)
+
+        # 3. Mark all as Seen
+        all_success = success_health_ids + success_worship_ids
+        if all_success:
+            await asyncio.to_thread(_mark_emails_as_seen, server, email_addr, password, all_success)
             
     except Exception as e:
         logger.error(f"Email Ingest Failed: {e}")
 
-def _process_emails_thread(server, email_addr, password, h_subj, s_subj) -> List[Tuple[Dict[str, Any], str]]:
-    results = []
+def _process_emails_thread(server, email_addr, password, h_subj, s_subj) -> Tuple[List, List, List]:
+    health_results = []
+    worship_results = []
+    processed_ids = []
+    
     try:
         mail = imaplib.IMAP4_SSL(server)
         mail.login(email_addr, password)
         mail.select("inbox")
         
+        # Combined Search: Health OR Sleep OR Worship Sender
+        # Note: IMAP search syntax is picky. We do separate searches to be safe.
+        
+        # 1. Health Search
         search_query = f'(OR (SUBJECT "{h_subj}") (SUBJECT "{s_subj}"))'
         status, messages = mail.search(None, 'UNSEEN', search_query)
-        if status != "OK": return []
-
-        email_ids = messages[0].split()
-        for eid_bytes in email_ids:
-            eid = eid_bytes.decode('utf-8')
-            try:
-                _, msg_data = mail.fetch(eid_bytes, "(RFC822)")
-                msg = email.message_from_bytes(msg_data[0][1])
-                subj = decode_header(msg["Subject"])[0][0]
-                if isinstance(subj, bytes): subj = subj.decode()
-                
-                payload = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        if part.get_content_type() == "text/plain":
-                            payload = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                            break
-                else:
-                    payload = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-
-                data = None
-                if h_subj in subj: data = _parse_json_health_data(payload)
-                elif s_subj in subj: data = _parse_text_sleep_data(payload)
-                
-                if data: results.append((data, eid))
-                
-            except Exception: pass
         
+        if status == "OK":
+            for eid_bytes in messages[0].split():
+                eid = eid_bytes.decode('utf-8')
+                try:
+                    payload = _fetch_payload(mail, eid_bytes)
+                    if payload:
+                        data = None
+                        if h_subj in payload or "Date" in payload: data = _parse_json_health_data(payload)
+                        if not data and (s_subj in payload or "Sleep" in payload): data = _parse_text_sleep_data(payload)
+                        
+                        if data: health_results.append((data, eid))
+                except: pass
+
+        # 2. Worship Search (Sender Based)
+        # Assuming sender is 'timothy@cfcutah.org' - adjust as needed
+        status, messages = mail.search(None, 'UNSEEN', '(FROM "timothy@cfcutah.org")')
+        if status == "OK":
+             for eid_bytes in messages[0].split():
+                eid = eid_bytes.decode('utf-8')
+                try:
+                    payload = _fetch_payload(mail, eid_bytes)
+                    if payload:
+                        worship_data = _parse_worship_email(payload)
+                        if worship_data: worship_results.append((worship_data, eid))
+                except: pass
+
         mail.logout()
-        return results
-    except Exception: return []
+        return health_results, worship_results, processed_ids
+    except Exception: return [], [], []
+
+def _fetch_payload(mail, eid_bytes):
+    _, msg_data = mail.fetch(eid_bytes, "(RFC822)")
+    msg = email.message_from_bytes(msg_data[0][1])
+    
+    payload = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                break
+    else:
+        payload = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+    return payload
 
 def _mark_emails_as_seen(server, email_addr, password, ids: List[str]):
     try:

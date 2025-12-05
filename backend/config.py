@@ -39,7 +39,7 @@ STEWARD_WORSHIP_FOLDER = "Family Worship"
 STEWARD_CURRICULUM_FOLDER = "Curriculum"
 
 # === MODEL SETTINGS ===
-DEFAULT_MLX_MODEL = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-6bit"
+DEFAULT_MLX_MODEL = "mlx-community/Qwen3-30B-A3B-Instruct-2507-6bit-DWQ-lr1e-8"
 
 # UPDATED: High-Fidelity Reranker (Matches Qwen Embedding quality)
 DEFAULT_RERANKER_MODEL = "mixedbread-ai/mxbai-rerank-large-v1"

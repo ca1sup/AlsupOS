@@ -1,3 +1,4 @@
+# backend/main.py
 # Force Tokenizers to run sequentially to prevent Metal/Fork crashes on macOS
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -79,7 +80,7 @@ except ImportError:
     async def load_whisper_model(): return None
 
 from backend.email_tools import create_draft_task
-from backend.analysis import get_mood_health_correlation
+from backend.analysis import get_mood_health_correlation, analyze_sentiment_simple
 from chromadb import PersistentClient
 
 from backend.config import (
@@ -543,8 +544,12 @@ async def api_er_update_audio(pid: int, file: UploadFile = File(...)):
     model = await get_whisper_model()
     if not model: 
         raise HTTPException(status_code=503, detail="Whisper unavailable (Loading or Missing).")
-        
-    temp_path = Path(tempfile.gettempdir()) / f"er_audio_{pid}_{datetime.now().timestamp()}.webm"
+    
+    # --- FIX: Preserve File Extension for FFmpeg (Mac/Safari Support) ---
+    original_ext = Path(file.filename).suffix.lower()
+    if not original_ext: original_ext = ".webm" # Fallback
+    
+    temp_path = Path(tempfile.gettempdir()) / f"er_audio_{pid}_{datetime.now().timestamp()}{original_ext}"
     try:
         async with aiofiles.open(temp_path, "wb") as f:
             while chunk := await file.read(UPLOAD_CHUNK_SIZE): await f.write(chunk)
@@ -625,8 +630,12 @@ async def api_transcribe_temp(file: UploadFile = File(...)):
     model = await get_whisper_model()
     if not model: 
         raise HTTPException(status_code=503, detail="Whisper unavailable (Loading or Missing).")
-        
-    temp_path = Path(tempfile.gettempdir()) / f"temp_transcribe_{datetime.now().timestamp()}.webm"
+    
+    # --- FIX: Preserve File Extension here too ---
+    original_ext = Path(file.filename).suffix.lower()
+    if not original_ext: original_ext = ".webm"
+
+    temp_path = Path(tempfile.gettempdir()) / f"temp_transcribe_{datetime.now().timestamp()}{original_ext}"
     try:
         async with aiofiles.open(temp_path, "wb") as f:
             while chunk := await file.read(UPLOAD_CHUNK_SIZE): await f.write(chunk)
@@ -672,6 +681,19 @@ async def api_save_note(p: NotePayload):
     if p.category == "Reminder": filename = "reminders.txt"
     if p.category == "Inbox": filename = f"note_{datetime.now().strftime('%H%M%S')}.md"
     
+    # === NEW: Journal Sentiment Integration ===
+    if p.category == "Journal":
+        # Run sentiment analysis on the raw content
+        score, mag = analyze_sentiment_simple(p.content)
+        # Store in DB
+        async with get_db_connection() as db:
+            await db.execute(
+                "INSERT INTO sentiment_log (date, score, magnitude, source_text) VALUES (?, ?, ?, ?)",
+                (datetime.now().isoformat(), score, mag, p.content[:200]) # Store snippet
+            )
+            await db.commit()
+    # ==========================================
+
     file_path = path / filename
     timestamp = datetime.now().strftime('%H:%M:%S')
     
@@ -897,7 +919,8 @@ async def ws_rag(ws: WebSocket):
             history_objs = await get_chat_history(sid, lightweight=True)
             chat_history = [{"role": h['role'], "content": h['content']} for h in history_objs[-10:]]
 
-            AGENT_PERSONAS = {"Steward", "Clinical", "CFO", "Coach", "Mentor", "Vault"}
+            # EXPANDED Persona List for the "Steward Protocol"
+            AGENT_PERSONAS = {"Steward", "Clinical", "CFO", "Coach", "Mentor", "Vault", "Chef", "Citizen"}
             
             # Wrap RAG Generation in Lock to prevent collision with Whisper or other Agents
             async with MLX_LOCK:
